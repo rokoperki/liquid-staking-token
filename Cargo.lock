@@ -294,6 +294,7 @@ dependencies = [
  "pinocchio-associated-token-account",
  "pinocchio-system",
  "pinocchio-token",
+ "solana-stake-interface",
  "solana-stake-program",
  "thiserror",
 ]

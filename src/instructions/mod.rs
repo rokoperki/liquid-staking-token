@@ -5,3 +5,7 @@ pub use initialize_stake::*;
 pub mod deposit_stake;
 
 pub use deposit_stake::*;
+
+pub mod merge;
+
+pub use merge::*;

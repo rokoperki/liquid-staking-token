@@ -1,4 +1,4 @@
-use pinocchio::{msg, program_error::ProgramError};
+use pinocchio::program_error::ProgramError;
 
 use crate::MIN_STAKE_DELEGATION;
 
@@ -18,7 +18,6 @@ impl<'a> TryFrom<&'a [u8]> for DepositInstructionData {
 
         let amount = u64::from_le_bytes(data[0..8].try_into().unwrap());
         let deposit_stake_bump = u8::from_le_bytes(data[8..9].try_into().unwrap());
-
 
         if amount == 0 {
             return Err(ProgramError::InvalidInstructionData);

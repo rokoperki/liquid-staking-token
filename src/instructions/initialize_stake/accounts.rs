@@ -1,4 +1,4 @@
-use pinocchio::{account_info::AccountInfo, msg, program_error::ProgramError};
+use pinocchio::{account_info::AccountInfo, program_error::ProgramError};
 
 use crate::{
     ProgramAccount, SignerAccount,
@@ -51,7 +51,6 @@ impl<'a> TryFrom<&'a [AccountInfo]> for InitializeAccounts<'a> {
         }
 
         if validator_vote.owner() != &VOTE_PROGRAM_ID {
-            msg!("Invalid validator vote account");
             return Err(ProgramError::InvalidAccountData);
         }
 

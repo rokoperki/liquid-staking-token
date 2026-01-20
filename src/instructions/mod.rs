@@ -1,7 +1,7 @@
-pub mod helpers;
+pub mod initialize_stake;
 
-pub use helpers::*;
+pub use initialize_stake::*;
 
-pub mod initialize;
+pub mod deposit_stake;
 
-pub use initialize::*;
+pub use deposit_stake::*;

@@ -10,8 +10,9 @@ pub struct PoolState {
     pub seed: u64,
     pub bump: u8,
     pub stake_bump: u8,
-    pub total_staked: u64,
+    pub mint_bump: u8,
     pub lst_supply: u64,
+    pub pending_deposits: u64,
     pub is_initialized: bool,
     pub stake_initialized: bool,
 }
@@ -85,12 +86,16 @@ impl PoolState {
     }
 
     #[inline(always)]
-    pub fn total_staked(&self) -> u64 {
-        self.total_staked
+    pub fn mint_bump(&self) -> u8 {
+        self.mint_bump
     }
 
     pub fn lst_supply(&self) -> u64 {
         self.lst_supply
+    }
+
+    pub fn pending_deposits(&self) -> u64 {
+        self.pending_deposits
     }
 
     #[inline(always)]
@@ -113,7 +118,7 @@ impl PoolState {
         seed: u64,
         bump: u8,
         stake_bump: u8,
-        total_staked: u64,
+        mint_bump: u8,
         lst_supply: u64,
         is_initialized: bool,
         stake_initialized: bool,
@@ -126,8 +131,9 @@ impl PoolState {
         self.seed = seed;
         self.bump = bump;
         self.stake_bump = stake_bump;
-        self.total_staked = total_staked;
+        self.mint_bump = mint_bump;
         self.lst_supply = lst_supply;
+        self.pending_deposits = 0;
         self.is_initialized = is_initialized;
         self.stake_initialized = stake_initialized;
     }

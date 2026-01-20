@@ -11,6 +11,8 @@ mod tests {
     };
     use spl_token::ID as TOKEN_PROGRAM_ID;
 
+    use solana_stake_program;
+
     // Your program ID - replace with actual
     const PROGRAM_ID: Pubkey = Pubkey::new_from_array([
         0x0f, 0x1e, 0x6b, 0x14, 0x21, 0xc0, 0x4a, 0x07, 0x04, 0x31, 0x26, 0x5c, 0x19, 0xc5, 0xbb,
@@ -37,7 +39,7 @@ mod tests {
     // Stake config (not a sysvar)
     const STAKE_CONFIG: Pubkey = Pubkey::new_from_array([
         6, 161, 216, 23, 165, 2, 5, 11, 104, 7, 145, 230, 206, 95, 249, 248, 36, 45, 178, 171, 63,
-        252, 207, 199, 82, 86, 83, 0, 0, 0, 0, 1,
+        252, 207, 199, 82, 86, 83, 0, 0, 99, 1, 1,
     ]);
 
     const SYSTEM_PROGRAM_ID: Pubkey = Pubkey::new_from_array([0; 32]);
@@ -142,7 +144,7 @@ mod tests {
         let initializer = Keypair::new();
 
         // Need enough for pool state + mint + stake account (with 1 SOL min delegation)
-        svm.airdrop(&initializer.pubkey(), 20_000_000_000).unwrap();
+        svm.airdrop(&initializer.pubkey(), 1_200_000_000).unwrap();
 
         // Create a validator vote account
         let validator_identity = Keypair::new();

@@ -86,14 +86,6 @@ impl<'a> Merge<'a> {
             deposit_lampors
         };
 
-        {
-            let mut pool_state_data = self.accounts.pool_state.try_borrow_mut_data()?;
-            let pool_state = PoolState::load_mut(&mut pool_state_data)?;
-
-            pool_state.pending_deposits =
-                pool_state.pending_deposits.saturating_sub(deposit_lamports);
-        }
-
         Ok(())
     }
 }

@@ -7,14 +7,14 @@ pub struct PoolState {
     pub authority: Pubkey,
     pub validator_vote: Pubkey,
     pub stake_account: Pubkey,
+    pub reserve_stake: Pubkey,
     pub seed: u64,
     pub bump: u8,
     pub stake_bump: u8,
     pub mint_bump: u8,
+    pub reserve_bump: u8,
     pub lst_supply: u64,
-    pub pending_deposits: u64,
     pub is_initialized: bool,
-    pub stake_initialized: bool,
 }
 
 use crate::Discriminator;
@@ -71,6 +71,11 @@ impl PoolState {
     }
 
     #[inline(always)]
+    pub fn reserve_stake(&self) -> Pubkey {
+        self.reserve_stake
+    }
+
+    #[inline(always)]
     pub fn seed(&self) -> u64 {
         self.seed
     }
@@ -90,22 +95,18 @@ impl PoolState {
         self.mint_bump
     }
 
-    pub fn lst_supply(&self) -> u64 {
-        self.lst_supply
+    #[inline(always)]
+    pub fn reserve_bump(&self) -> u8 {
+        self.reserve_bump
     }
 
-    pub fn pending_deposits(&self) -> u64 {
-        self.pending_deposits
+    pub fn lst_supply(&self) -> u64 {
+        self.lst_supply
     }
 
     #[inline(always)]
     pub fn is_initialized(&self) -> bool {
         self.is_initialized
-    }
-
-    #[inline(always)]
-    pub fn stake_initialized(&self) -> bool {
-        self.stake_initialized
     }
 
     #[inline(always)]
@@ -115,26 +116,27 @@ impl PoolState {
         authority: Pubkey,
         validator_vote: Pubkey,
         stake_account: Pubkey,
+        reserve_stake: Pubkey,
         seed: u64,
         bump: u8,
         stake_bump: u8,
         mint_bump: u8,
+        reserve_bump: u8,
         lst_supply: u64,
         is_initialized: bool,
-        stake_initialized: bool,
     ) {
         self.discriminator = Self::DISCRIMINATOR;
         self.lst_mint = lst_mint;
         self.authority = authority;
         self.validator_vote = validator_vote;
         self.stake_account = stake_account;
+        self.reserve_stake = reserve_stake;
         self.seed = seed;
         self.bump = bump;
         self.stake_bump = stake_bump;
         self.mint_bump = mint_bump;
+        self.reserve_bump = reserve_bump;
         self.lst_supply = lst_supply;
-        self.pending_deposits = 0;
         self.is_initialized = is_initialized;
-        self.stake_initialized = stake_initialized;
     }
 }

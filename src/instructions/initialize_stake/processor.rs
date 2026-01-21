@@ -56,6 +56,15 @@ impl<'a> TryFrom<(&[u8], &'a [AccountInfo])> for Initialize<'a> {
             data.stake_bump,
         )?;
 
+        ProgramAccount::verify(
+            &[
+                Seed::from(b"reserve_stake"),
+                Seed::from(accounts.pool_state.key().as_ref()),
+            ],
+            accounts.reserve_stake,
+            data.reserve_bump,
+        )?;
+
         Ok(Self { accounts, data })
     }
 }
@@ -68,6 +77,7 @@ impl<'a> Initialize<'a> {
         let pool_bump = [self.data.pool_bump];
         let mint_bump = [self.data.mint_bump];
         let stake_bump = [self.data.stake_bump];
+        let reserve_bump = [self.data.reserve_bump];
 
         let pool_seeds = [
             Seed::from(b"lst_pool"),
@@ -82,8 +92,21 @@ impl<'a> Initialize<'a> {
             Seed::from(&stake_bump),
         ];
 
+        let reserve_stake_seeds = [
+            Seed::from(b"reserve_stake"),
+            Seed::from(self.accounts.pool_state.key().as_ref()),
+            Seed::from(&reserve_bump),
+        ];
+
         self.create_pool_state(&pool_seeds)?;
         self.create_lst_mint(&mint_bump)?;
+
+        create_stake_account(
+            self.accounts.initializer,
+            self.accounts.reserve_stake,
+            0,
+            &reserve_stake_seeds,
+        )?;
 
         create_stake_account(
             self.accounts.initializer,
@@ -127,12 +150,13 @@ impl<'a> Initialize<'a> {
             *self.accounts.initializer.key(),
             *self.accounts.validator_vote.key(),
             *self.accounts.stake_account.key(),
+            *self.accounts.reserve_stake.key(),
             self.data.seed,
             self.data.pool_bump,
             self.data.stake_bump,
             self.data.mint_bump,
+            self.data.reserve_bump,
             0,
-            true,
             true,
         );
 

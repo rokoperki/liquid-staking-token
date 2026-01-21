@@ -143,21 +143,11 @@ impl<'a> Deposit<'a> {
             .checked_add(lst_amount)
             .ok_or(ProgramError::ArithmeticOverflow)?;
 
-        pool.pending_deposits = pool
-            .pending_deposits
-            .checked_add(self.instruction_data.amount)
-            .ok_or(ProgramError::ArithmeticOverflow)?;
-
         Ok(())
     }
 
     fn calculate_lst_amount(&self, pool: &PoolState) -> Result<u64, ProgramError> {
-        let total_sol = self
-            .accounts
-            .pool_stake
-            .lamports()
-            .checked_add(pool.pending_deposits)
-            .ok_or(ProgramError::ArithmeticOverflow)?;
+        let total_sol = self.accounts.pool_stake.lamports();
 
         if pool.lst_supply == 0 {
             Ok(self.instruction_data.amount)

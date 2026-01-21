@@ -59,17 +59,23 @@ mod tests {
         Pubkey::find_program_address(&[b"stake", pool_state.as_ref()], &PROGRAM_ID)
     }
 
+    fn derive_reserve_stake_account_pda(pool_state: &Pubkey) -> (Pubkey, u8) {
+        Pubkey::find_program_address(&[b"reserve_stake", pool_state.as_ref()], &PROGRAM_ID)
+    }
+
     fn create_initialize_instruction_data(
         seed: u64,
         pool_bump: u8,
         mint_bump: u8,
         stake_bump: u8,
+        reserve_bump: u8,
     ) -> Vec<u8> {
         let mut data = vec![0u8]; // Discriminator for Initialize
         data.extend_from_slice(&seed.to_le_bytes());
         data.push(pool_bump);
         data.push(mint_bump);
         data.push(stake_bump);
+        data.push(reserve_bump);
         data
     }
 
@@ -156,9 +162,10 @@ mod tests {
         let (pool_state_pda, pool_bump) = derive_pool_state_pda(&initializer.pubkey(), seed);
         let (lst_mint_pda, mint_bump) = derive_lst_mint_pda(&pool_state_pda);
         let (stake_account_pda, stake_bump) = derive_stake_account_pda(&pool_state_pda);
+        let (reserve_stake_pda, reserve_bump) = derive_reserve_stake_account_pda(&pool_state_pda);
 
         let instruction_data =
-            create_initialize_instruction_data(seed, pool_bump, mint_bump, stake_bump);
+            create_initialize_instruction_data(seed, pool_bump, mint_bump, stake_bump, reserve_bump);
 
         let instruction = Instruction {
             program_id: PROGRAM_ID,
@@ -167,6 +174,7 @@ mod tests {
                 AccountMeta::new(pool_state_pda, false),      // pool_state
                 AccountMeta::new(lst_mint_pda, false),        // lst_mint
                 AccountMeta::new(stake_account_pda, false),   // stake_account
+                AccountMeta::new(reserve_stake_pda, false),   // reserve_stake
                 AccountMeta::new_readonly(validator_vote, false), // validator_vote
                 AccountMeta::new_readonly(CLOCK_SYSVAR.into(), false), // clock
                 AccountMeta::new_readonly(RENT_SYSVAR.into(), false), // rent

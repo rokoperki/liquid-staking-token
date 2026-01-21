@@ -34,7 +34,6 @@ fn process_instruction(
             Initialize::try_from((data, accounts))?.process()
         }
         Some((&Deposit::DISCRIMINATOR, data)) => Deposit::try_from((data, accounts))?.process(),
-        Some((&Merge::DISCRIMINATOR, data)) => Merge::try_from((data, accounts))?.process(),
         _ => Err(ProgramError::InvalidInstructionData),
     }
 }

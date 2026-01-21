@@ -1,12 +1,10 @@
 use pinocchio::{
     ProgramResult, account_info::AccountInfo, instruction::Seed, program_error::ProgramError,
 };
+use pinocchio_system::instructions::Transfer;
 use pinocchio_token::instructions::MintTo;
 
-use crate::{
-    DepositAccounts, DepositInstructionData, PoolState, ProgramAccount, create_stake_account,
-    delegate_stake, initialize_stake,
-};
+use crate::{DepositAccounts, DepositInstructionData, PoolState};
 
 pub struct Deposit<'a> {
     pub accounts: DepositAccounts<'a>,
@@ -23,52 +21,21 @@ impl<'a> TryFrom<(&[u8], &'a [AccountInfo])> for Deposit<'a> {
         let pool_state_data = accounts.pool_state.try_borrow_data()?;
         let pool_state = PoolState::load(&pool_state_data)?;
 
-        let seed_bytes = pool_state.seed.to_le_bytes();
+        if pool_state.is_initialized == false {
+            return Err(ProgramError::UninitializedAccount);
+        }
 
         if accounts.pool_stake.key() != &pool_state.stake_account {
             return Err(ProgramError::InvalidAccountData);
         }
 
-        if accounts.validator_vote.key() != &pool_state.validator_vote {
+        if accounts.reserve_stake.key() != &pool_state.reserve_stake {
             return Err(ProgramError::InvalidAccountData);
         }
 
         if accounts.lst_mint.key() != &pool_state.lst_mint {
             return Err(ProgramError::InvalidAccountData);
         }
-
-        if !accounts.deposit_stake.data_is_empty() {
-            return Err(ProgramError::AccountAlreadyInitialized);
-        }
-
-        ProgramAccount::verify(
-            &[
-                Seed::from(b"lst_pool"),
-                Seed::from(pool_state.authority.as_ref()),
-                Seed::from(&seed_bytes),
-            ],
-            accounts.pool_state,
-            pool_state.bump,
-        )?;
-
-        ProgramAccount::verify(
-            &[
-                Seed::from(b"lst_mint"),
-                Seed::from(accounts.pool_state.key().as_ref()),
-            ],
-            accounts.lst_mint,
-            pool_state.mint_bump,
-        )?;
-
-        ProgramAccount::verify(
-            &[
-                Seed::from(b"stake"),
-                Seed::from(accounts.pool_state.key().as_ref()),
-                Seed::from(accounts.depositor.key().as_ref()),
-            ],
-            accounts.deposit_stake,
-            instruction_data.deposit_stake_bump,
-        )?;
 
         Ok(Self {
             accounts,
@@ -85,6 +52,8 @@ impl<'a> Deposit<'a> {
             let pool_state_data = self.accounts.pool_state.try_borrow_data()?;
             let pool_state = PoolState::load(&pool_state_data)?;
 
+            let lst_amount = self.calculate_lst_amount(&pool_state)?;
+
             let seed_binding = pool_state.seed.to_le_bytes();
             let bump_binding = [pool_state.bump];
             let pool_seeds = [
@@ -94,48 +63,20 @@ impl<'a> Deposit<'a> {
                 Seed::from(&bump_binding),
             ];
 
-            let deposit_bump_binding = [self.instruction_data.deposit_stake_bump];
-            let depositor_stake_seeds = [
-                Seed::from(b"stake"),
-                Seed::from(self.accounts.pool_state.key().as_ref()),
-                Seed::from(self.accounts.depositor.key().as_ref()),
-                Seed::from(&deposit_bump_binding),
-            ];
-
-            let lst_amount = self.calculate_lst_amount(&pool_state)?;
-
             let _ = pool_state;
 
-            create_stake_account(
-                self.accounts.depositor,
-                self.accounts.deposit_stake,
-                self.instruction_data.amount,
-                &depositor_stake_seeds,
-            )?;
-
-            initialize_stake(
-                self.accounts.deposit_stake,
-                self.accounts.rent,
-                self.accounts.pool_state,
-                self.accounts.pool_state,
-            )?;
-
-            delegate_stake(
-                self.accounts.deposit_stake,
-                self.accounts.validator_vote,
-                self.accounts.clock,
-                self.accounts.stake_history,
-                self.accounts.stake_config,
-                self.accounts.pool_state,
-                &pool_seeds,
-            )?;
+            Transfer {
+                from: self.accounts.depositor,
+                to: self.accounts.reserve_stake,
+                lamports: self.instruction_data.amount,
+            }
+            .invoke()?;
 
             self.mint_lst(lst_amount, &pool_seeds)?;
 
             lst_amount
         };
 
-        // Now we can borrow mutably
         let mut pool_data = self.accounts.pool_state.try_borrow_mut_data()?;
         let pool = PoolState::load_mut(&mut pool_data)?;
         pool.lst_supply = pool
@@ -147,7 +88,11 @@ impl<'a> Deposit<'a> {
     }
 
     fn calculate_lst_amount(&self, pool: &PoolState) -> Result<u64, ProgramError> {
-        let total_sol = self.accounts.pool_stake.lamports();
+        let pool_stake_sol = self.accounts.pool_stake.lamports();
+        let reserve_stake_sol = self.accounts.reserve_stake.lamports();
+        let total_pool_value = pool_stake_sol
+            .checked_add(reserve_stake_sol)
+            .ok_or(ProgramError::ArithmeticOverflow)?;
 
         if pool.lst_supply == 0 {
             Ok(self.instruction_data.amount)
@@ -155,12 +100,13 @@ impl<'a> Deposit<'a> {
             let lst_amount = (self.instruction_data.amount as u128)
                 .checked_mul(pool.lst_supply as u128)
                 .ok_or(ProgramError::ArithmeticOverflow)?
-                .checked_div(total_sol as u128)
+                .checked_div(total_pool_value as u128)
                 .ok_or(ProgramError::ArithmeticOverflow)?;
 
             Ok(lst_amount as u64)
         }
     }
+
     fn mint_lst(&self, amount: u64, pool_seeds: &[Seed]) -> ProgramResult {
         let signer = [pinocchio::instruction::Signer::from(pool_seeds)];
 

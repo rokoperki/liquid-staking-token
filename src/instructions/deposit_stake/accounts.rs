@@ -1,23 +1,14 @@
 use pinocchio::{account_info::AccountInfo, program_error::ProgramError};
 
-use crate::{
-    AssociatedToken, Mint, PoolState, ProgramAccount, STAKE_PROGRAM_ID, SignerAccount,
-    VOTE_PROGRAM_ID,
-};
+use crate::{AssociatedToken, Mint, PoolState, ProgramAccount, STAKE_PROGRAM_ID, SignerAccount};
 
 pub struct DepositAccounts<'a> {
     pub depositor: &'a AccountInfo,
     pub pool_state: &'a AccountInfo,
-    pub deposit_stake: &'a AccountInfo,
     pub pool_stake: &'a AccountInfo,
-    pub validator_vote: &'a AccountInfo,
+    pub reserve_stake: &'a AccountInfo,
     pub lst_mint: &'a AccountInfo,
     pub depositor_lst_ata: &'a AccountInfo,
-    /// Sysvar accounts
-    pub clock: &'a AccountInfo,
-    pub rent: &'a AccountInfo,
-    pub stake_history: &'a AccountInfo,
-    pub stake_config: &'a AccountInfo,
     /// Programs
     pub system_program: &'a AccountInfo,
     pub token_program: &'a AccountInfo,
@@ -32,15 +23,10 @@ impl<'a> TryFrom<&'a [AccountInfo]> for DepositAccounts<'a> {
         let [
             depositor,
             pool_state,
-            deposit_stake,
             pool_stake,
-            validator_vote,
+            reserve_stake,
             lst_mint,
             depositor_lst_ata,
-            clock,
-            rent,
-            stake_history,
-            stake_config,
             system_program,
             token_program,
             stake_program,
@@ -69,22 +55,13 @@ impl<'a> TryFrom<&'a [AccountInfo]> for DepositAccounts<'a> {
             return Err(ProgramError::IncorrectProgramId);
         }
 
-        if validator_vote.owner() != &VOTE_PROGRAM_ID {
-            return Err(ProgramError::InvalidAccountData);
-        }
-
         Ok(Self {
             depositor,
             pool_state,
-            deposit_stake,
             pool_stake,
-            validator_vote,
+            reserve_stake,
             lst_mint,
             depositor_lst_ata,
-            clock,
-            rent,
-            stake_history,
-            stake_config,
             system_program,
             token_program,
             stake_program,

@@ -62,6 +62,10 @@ mod tests {
         )
     }
 
+    fn derive_reserve_stake_account_pda(pool_state: &Pubkey) -> (Pubkey, u8) {
+        Pubkey::find_program_address(&[b"reserve_stake", pool_state.as_ref()], &PROGRAM_ID)
+    }
+
     fn derive_ata(owner: &Pubkey, mint: &Pubkey) -> Pubkey {
         Pubkey::find_program_address(
             &[owner.as_ref(), TOKEN_PROGRAM_ID.as_ref(), mint.as_ref()],
@@ -75,19 +79,20 @@ mod tests {
         pool_bump: u8,
         mint_bump: u8,
         stake_bump: u8,
+        reserve_bump: u8,
     ) -> Vec<u8> {
         let mut data = vec![0u8]; // Discriminator for Initialize
         data.extend_from_slice(&seed.to_le_bytes());
         data.push(pool_bump);
         data.push(mint_bump);
         data.push(stake_bump);
+        data.push(reserve_bump);
         data
     }
 
-    fn create_deposit_instruction_data(amount: u64, deposit_stake_bump: u8) -> Vec<u8> {
+    fn create_deposit_instruction_data(amount: u64) -> Vec<u8> {
         let mut data = vec![1u8]; // Discriminator for Deposit
         data.extend_from_slice(&amount.to_le_bytes());
-        data.push(deposit_stake_bump);
         data
     }
 
@@ -148,7 +153,9 @@ mod tests {
     }
 
     /// Helper to initialize a pool and return all the PDAs
-    fn initialize_pool(svm: &mut LiteSVM) -> (Keypair, Pubkey, Pubkey, Pubkey, Pubkey, u64) {
+    fn initialize_pool(
+        svm: &mut LiteSVM,
+    ) -> (Keypair, Pubkey, Pubkey, Pubkey, Pubkey, Pubkey, u64) {
         let initializer = Keypair::new();
         svm.airdrop(&initializer.pubkey(), 2_000_000_000).unwrap();
 
@@ -160,25 +167,32 @@ mod tests {
         let (pool_state_pda, pool_bump) = derive_pool_state_pda(&initializer.pubkey(), seed);
         let (lst_mint_pda, mint_bump) = derive_lst_mint_pda(&pool_state_pda);
         let (stake_account_pda, stake_bump) = derive_stake_account_pda(&pool_state_pda);
+        let (reserve_stake_pda, reserve_bump) = derive_reserve_stake_account_pda(&pool_state_pda);
 
-        let instruction_data =
-            create_initialize_instruction_data(seed, pool_bump, mint_bump, stake_bump);
+        let instruction_data = create_initialize_instruction_data(
+            seed,
+            pool_bump,
+            mint_bump,
+            stake_bump,
+            reserve_bump,
+        );
 
         let instruction = Instruction {
             program_id: PROGRAM_ID,
             accounts: vec![
-                AccountMeta::new(initializer.pubkey(), true),
-                AccountMeta::new(pool_state_pda, false),
-                AccountMeta::new(lst_mint_pda, false),
-                AccountMeta::new(stake_account_pda, false),
-                AccountMeta::new_readonly(validator_vote, false),
-                AccountMeta::new_readonly(CLOCK_SYSVAR.into(), false),
-                AccountMeta::new_readonly(RENT_SYSVAR.into(), false),
-                AccountMeta::new_readonly(STAKE_HISTORY_SYSVAR, false),
-                AccountMeta::new_readonly(STAKE_CONFIG, false),
-                AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
-                AccountMeta::new_readonly(TOKEN_PROGRAM_ID, false),
-                AccountMeta::new_readonly(STAKE_PROGRAM_ID, false),
+                AccountMeta::new(initializer.pubkey(), true), // initializer
+                AccountMeta::new(pool_state_pda, false),      // pool_state
+                AccountMeta::new(lst_mint_pda, false),        // lst_mint
+                AccountMeta::new(stake_account_pda, false),   // stake_account
+                AccountMeta::new(reserve_stake_pda, false),   // reserve_stake
+                AccountMeta::new_readonly(validator_vote, false), // validator_vote
+                AccountMeta::new_readonly(CLOCK_SYSVAR.into(), false), // clock
+                AccountMeta::new_readonly(RENT_SYSVAR.into(), false), // rent
+                AccountMeta::new_readonly(STAKE_HISTORY_SYSVAR, false), // stake_history
+                AccountMeta::new_readonly(STAKE_CONFIG, false), // stake_config
+                AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false), // system_program
+                AccountMeta::new_readonly(TOKEN_PROGRAM_ID, false), // token_program
+                AccountMeta::new_readonly(STAKE_PROGRAM_ID, false), // stake_program
             ],
             data: instruction_data,
         };
@@ -193,12 +207,16 @@ mod tests {
         let result = svm.send_transaction(transaction);
         print_transaction_logs(&result);
         assert!(result.is_ok(), "Initialize should succeed");
+        let reserve_after = svm.get_account(&reserve_stake_pda).unwrap();
+        println!("Reserve stake lamports after init: {}", reserve_after.lamports);
+        println!("=== Pool Initialized Successfully ===");
 
         (
             initializer,
             pool_state_pda,
             lst_mint_pda,
             stake_account_pda,
+            reserve_stake_pda,
             validator_vote,
             seed,
         )
@@ -209,41 +227,58 @@ mod tests {
         let mut svm = setup_svm();
 
         // Initialize pool first
-        let (_, pool_state_pda, lst_mint_pda, pool_stake_pda, validator_vote, _) =
+        let (_, pool_state_pda, lst_mint_pda, pool_stake_pda, reserve_stake_pda, validator_vote, _) =
             initialize_pool(&mut svm);
+
+        // Verify initialization worked
+        let pool_stake_account = svm.get_account(&pool_stake_pda);
+        assert!(pool_stake_account.is_some(), "Pool stake should exist");
+
+        let reserve_stake_account = svm.get_account(&reserve_stake_pda);
+        assert!(
+            reserve_stake_account.is_some(),
+            "Reserve stake should exist"
+        );
 
         // Create depositor
         let depositor = Keypair::new();
-        let deposit_amount = 1_000_000_000u64; // 1 SOL
-        svm.airdrop(&depositor.pubkey(), 2_000_000_000).unwrap(); // Extra for rent
+        let deposit_amount = 5_000_000u64;
+        svm.airdrop(&depositor.pubkey(), 2_000_000_000).unwrap();
 
-        // Derive deposit stake PDA
-        let (deposit_stake_pda, deposit_stake_bump) =
-            derive_deposit_stake_pda(&pool_state_pda, &depositor.pubkey());
-
-        // Derive depositor's LST ATA
+        // Derive and CREATE depositor's LST ATA
         let depositor_lst_ata = derive_ata(&depositor.pubkey(), &lst_mint_pda);
 
-        let instruction_data = create_deposit_instruction_data(deposit_amount, deposit_stake_bump);
+        let create_ata_ix =
+            spl_associated_token_account::instruction::create_associated_token_account(
+                &depositor.pubkey(),
+                &depositor.pubkey(),
+                &lst_mint_pda,
+                &TOKEN_PROGRAM_ID,
+            );
+
+        let tx = Transaction::new_signed_with_payer(
+            &[create_ata_ix],
+            Some(&depositor.pubkey()),
+            &[&depositor],
+            svm.latest_blockhash(),
+        );
+        svm.send_transaction(tx).expect("Should create ATA");
+
+        let instruction_data = create_deposit_instruction_data(deposit_amount);
 
         let instruction = Instruction {
             program_id: PROGRAM_ID,
             accounts: vec![
-                AccountMeta::new(depositor.pubkey(), true), // depositor
-                AccountMeta::new(pool_state_pda, false),    // pool_state
-                AccountMeta::new(deposit_stake_pda, false), // deposit_stake
-                AccountMeta::new_readonly(pool_stake_pda, false), // pool_stake
-                AccountMeta::new_readonly(validator_vote, false), // validator_vote
-                AccountMeta::new(lst_mint_pda, false),      // lst_mint
-                AccountMeta::new(depositor_lst_ata, false), // depositor_lst_ata
-                AccountMeta::new_readonly(CLOCK_SYSVAR.into(), false),
-                AccountMeta::new_readonly(RENT_SYSVAR.into(), false),
-                AccountMeta::new_readonly(STAKE_HISTORY_SYSVAR, false),
-                AccountMeta::new_readonly(STAKE_CONFIG, false),
+                AccountMeta::new(depositor.pubkey(), true),
+                AccountMeta::new(pool_state_pda, false),
+                AccountMeta::new_readonly(pool_stake_pda, false),
+                AccountMeta::new(reserve_stake_pda, false), // ✅ Changed to writable
+                AccountMeta::new(lst_mint_pda, false),
+                AccountMeta::new(depositor_lst_ata, false),
                 AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
                 AccountMeta::new_readonly(TOKEN_PROGRAM_ID, false),
                 AccountMeta::new_readonly(STAKE_PROGRAM_ID, false),
-                AccountMeta::new_readonly(ATA_PROGRAM_ID, false), // ata_program
+                AccountMeta::new_readonly(ATA_PROGRAM_ID, false),
             ],
             data: instruction_data,
         };
@@ -259,44 +294,27 @@ mod tests {
         print_transaction_logs(&result);
         assert!(result.is_ok(), "Deposit should succeed");
 
-        // Verify deposit stake was created
-        let deposit_stake_account = svm.get_account(&deposit_stake_pda);
-        assert!(
-            deposit_stake_account.is_some(),
-            "Deposit stake account should exist"
-        );
-        let deposit_stake = deposit_stake_account.unwrap();
-        assert_eq!(
-            deposit_stake.owner, STAKE_PROGRAM_ID,
-            "Deposit stake should be owned by stake program"
-        );
-
-        // Verify depositor received LST tokens
-        let lst_ata_account = svm.get_account(&depositor_lst_ata);
-        assert!(lst_ata_account.is_some(), "Depositor LST ATA should exist");
-
-        // Parse token account to check balance
-        let lst_ata = lst_ata_account.unwrap();
-        assert_eq!(
-            lst_ata.owner, TOKEN_PROGRAM_ID,
-            "ATA should be owned by token program"
-        );
-
-        // Token account data: first 64 bytes are mint (32) + owner (32), then amount at offset 64
-        let amount_bytes: [u8; 8] = lst_ata.data[64..72].try_into().unwrap();
+        // ✅ Verify LST tokens
+        let lst_ata_account = svm.get_account(&depositor_lst_ata).unwrap();
+        let amount_bytes: [u8; 8] = lst_ata_account.data[64..72].try_into().unwrap();
         let lst_balance = u64::from_le_bytes(amount_bytes);
+        assert_eq!(lst_balance, deposit_amount, "Should receive 1:1 LST");
 
-        // First deposit: 1:1 ratio, but pool has initial stake from initialize
-        // So LST amount = deposit_amount * lst_supply / total_sol
-        // Since lst_supply is 0 initially, first deposit gets 1:1
-        assert_eq!(
-            lst_balance, deposit_amount,
-            "Should receive 1:1 LST for first deposit"
+        // ✅ Verify reserve stake received SOL
+        let reserve_after = svm.get_account(&reserve_stake_pda).unwrap();
+        assert!(
+            reserve_after.lamports >= deposit_amount,
+            "Reserve should have received deposit"
         );
 
-        println!("\n=== Deposit Verification Passed ===");
-        println!("  Deposit Stake: {}", deposit_stake_pda);
-        println!("  Depositor LST ATA: {}", depositor_lst_ata);
-        println!("  LST Balance: {}", lst_balance / 1_000_000_000);
+        println!(
+            "Reserve stake lamports before deposit: {}",
+            reserve_after.lamports - deposit_amount
+        );
+        println!(
+            "Reserve stake lamports after deposit: {}",
+            reserve_after.lamports
+        );
+        println!("\n=== All Verifications Passed ===");
     }
 }

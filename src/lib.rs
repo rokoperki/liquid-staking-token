@@ -38,6 +38,7 @@ fn process_instruction(
             InitializeReserve::try_from(accounts)?.process()
         }
         Some((&MergeReserve::DISCRIMINATOR, _data)) => MergeReserve::try_from(accounts)?.process(),
+        Some((&Withdraw::DISCRIMINATOR, data)) => Withdraw::try_from((data, accounts))?.process(),
 
         _ => Err(ProgramError::InvalidInstructionData),
     }

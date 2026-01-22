@@ -218,3 +218,84 @@ pub fn merge_stake<'a>(
     msg!("Stakes merged");
     Ok(())
 }
+
+pub fn split_stake<'a>(
+    destination: &'a AccountInfo,
+    source: &'a AccountInfo,
+    staker: &'a AccountInfo,
+    signer_seeds: &[Seed],
+    amount: u64,
+) -> ProgramResult {
+    let signer = [Signer::from(signer_seeds)];
+    let mut data = [0u8; 12];
+    data[0..4].copy_from_slice(&3u32.to_le_bytes());
+    data[4..12].copy_from_slice(&amount.to_le_bytes());
+
+    let ix = Instruction {
+        program_id: &STAKE_PROGRAM_ID,
+        accounts: &[
+            AccountMeta {
+                pubkey: destination.key(),
+                is_signer: false,
+                is_writable: true,
+            },
+            AccountMeta {
+                pubkey: source.key(),
+                is_signer: false,
+                is_writable: true,
+            },
+            AccountMeta {
+                pubkey: staker.key(),
+                is_signer: true,
+                is_writable: false,
+            },
+        ],
+        data: &data,
+    };
+
+    pinocchio::program::invoke_signed(&ix, &[destination, source, staker], &signer)?;
+
+    msg!("Stakes merged");
+    Ok(())
+}
+
+pub fn deactivate_stake<'a>(
+    stake_account: &'a AccountInfo,
+    clock: &'a AccountInfo,
+    staker: &'a AccountInfo,
+    signer_seeds: &[Seed],
+) -> ProgramResult {
+    let signer = [Signer::from(signer_seeds)];
+    let data = 5u32.to_le_bytes();  // Deactivate discriminator, no extra data
+
+    let ix = Instruction {
+        program_id: &STAKE_PROGRAM_ID,
+        accounts: &[
+            AccountMeta {
+                pubkey: stake_account.key(),
+                is_signer: false,
+                is_writable: true,
+            },
+            AccountMeta {
+                pubkey: clock.key(),
+                is_signer: false,
+                is_writable: false,
+            },
+            AccountMeta {
+                pubkey: staker.key(),
+                is_signer: true,
+                is_writable: false,
+            },
+        ],
+        data: &data,
+    };
+
+    pinocchio::program::invoke_signed(
+        &ix,
+        &[stake_account, clock, staker],
+        &signer,
+    )?;
+
+    msg!("Stake deactivated");
+    Ok(())
+}

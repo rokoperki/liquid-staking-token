@@ -4,7 +4,7 @@ use pinocchio::{
 use pinocchio_system::instructions::Transfer;
 use pinocchio_token::instructions::MintTo;
 
-use crate::{DepositAccounts, DepositInstructionData, PoolState};
+use crate::{DepositAccounts, DepositInstructionData, PoolState, ProgramAccount};
 
 pub struct Deposit<'a> {
     pub accounts: DepositAccounts<'a>,
@@ -20,6 +20,17 @@ impl<'a> TryFrom<(&[u8], &'a [AccountInfo])> for Deposit<'a> {
 
         let pool_state_data = accounts.pool_state.try_borrow_data()?;
         let pool_state = PoolState::load(&pool_state_data)?;
+
+        let seed_bytes = pool_state.seed.to_le_bytes();
+        ProgramAccount::verify(
+            &[
+                Seed::from(b"lst_pool"),
+                Seed::from(pool_state.authority.as_ref()),
+                Seed::from(&seed_bytes),
+            ],
+            accounts.pool_state,
+            pool_state.bump,
+        )?;
 
         if pool_state.is_initialized == false {
             return Err(ProgramError::UninitializedAccount);

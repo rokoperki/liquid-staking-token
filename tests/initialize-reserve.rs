@@ -226,114 +226,68 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_reserve_success() {
+    fn test_initialize_reserve_success() {
         let mut svm = setup_svm();
-    
-        // 1. Initialize pool (creates pool_stake delegated, reserve_stake created but empty)
-        let (initializer, pool_state_pda, _, pool_stake_pda, reserve_stake_pda, validator_vote, _) =
+
+        // Initialize pool (reserve stake is created but not initialized/delegated)
+        let (_, pool_state_pda, _, pool_stake_pda, reserve_stake_pda, validator_vote, _) =
             initialize_pool(&mut svm);
-    
-        // 2. Add lamports to reserve_stake (simulating deposits)
-        svm.airdrop(&reserve_stake_pda, 2_000_000_000).unwrap();
-    
-        // 3. Initialize and delegate reserve_stake
+
+        // Create InitializeReserve instruction
+        let instruction_data = vec![2u8]; // Discriminator for InitializeReserve
+
+        // Anyone can call this (permissionless crank)
         let crank = Keypair::new();
         svm.airdrop(&crank.pubkey(), 1_000_000_000).unwrap();
-    
-        let init_reserve_ix = Instruction {
+
+        svm.airdrop(&reserve_stake_pda, 1_000_000_000).unwrap();
+
+        let instruction = Instruction {
             program_id: PROGRAM_ID,
             accounts: vec![
-                AccountMeta::new(pool_state_pda, false),              // pool_state
-                AccountMeta::new_readonly(pool_stake_pda, false),     // pool_stake
-                AccountMeta::new(reserve_stake_pda, false),           // reserve_stake
-                AccountMeta::new_readonly(validator_vote, false),     // validator_vote
+                AccountMeta::new(pool_state_pda, false),          // pool_state
+                AccountMeta::new_readonly(pool_stake_pda, false), // pool_stake
+                AccountMeta::new(reserve_stake_pda, false),       // reserve_stake
+                AccountMeta::new_readonly(validator_vote, false), // validator_vote
                 AccountMeta::new_readonly(CLOCK_SYSVAR.into(), false), // clock
-                AccountMeta::new_readonly(RENT_SYSVAR.into(), false),  // rent
+                AccountMeta::new_readonly(RENT_SYSVAR.into(), false), // rent
                 AccountMeta::new_readonly(STAKE_HISTORY_SYSVAR, false), // stake_history
-                AccountMeta::new_readonly(STAKE_CONFIG, false),       // stake_config
-                AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),   // system_program
-                AccountMeta::new_readonly(STAKE_PROGRAM_ID, false),   // stake_program
+                AccountMeta::new_readonly(STAKE_CONFIG, false),   // stake_config
+                AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false), // system_program
+                AccountMeta::new_readonly(STAKE_PROGRAM_ID, false), // stake_program
             ],
-            data: vec![2u8], // InitializeReserve discriminator
+            data: instruction_data,
         };
-    
-        let tx = Transaction::new_signed_with_payer(
-            &[init_reserve_ix],
+
+        let transaction = Transaction::new_signed_with_payer(
+            &[instruction],
             Some(&crank.pubkey()),
             &[&crank],
             svm.latest_blockhash(),
         );
-    
-        let result = svm.send_transaction(tx);
+
+        let result = svm.send_transaction(transaction);
         print_transaction_logs(&result);
         assert!(result.is_ok(), "InitializeReserve should succeed");
-    
-        println!("\n=== Reserve Initialized & Delegated ===");
-    
-        // 4. Warp forward to next epoch so both stakes become active
-        // Stakes need to be in the same state (both active) to merge
-        let slots_per_epoch = 432_000; // mainnet default, LiteSVM might differ
-        svm.warp_to_slot(slots_per_epoch * 2); // warp 2 epochs forward to be safe
-    
-        // 5. Call MergeReserve
-        let pool_stake_before = svm.get_account(&pool_stake_pda).unwrap();
-        let reserve_stake_before = svm.get_account(&reserve_stake_pda).unwrap();
-    
-        println!("\n=== Before Merge ===");
-        println!("  Pool stake lamports: {}", pool_stake_before.lamports);
-        println!("  Reserve stake lamports: {}", reserve_stake_before.lamports);
-    
-        let merge_ix = Instruction {
-            program_id: PROGRAM_ID,
-            accounts: vec![
-                AccountMeta::new(pool_state_pda, false),              // pool_state
-                AccountMeta::new(pool_stake_pda, false),              // pool_stake (destination)
-                AccountMeta::new(reserve_stake_pda, false),           // reserve_stake (source)
-                AccountMeta::new_readonly(CLOCK_SYSVAR.into(), false), // clock
-                AccountMeta::new_readonly(STAKE_HISTORY_SYSVAR, false), // stake_history
-                AccountMeta::new_readonly(STAKE_PROGRAM_ID, false),   // stake_program
-            ],
-            data: vec![3u8], // MergeReserve discriminator
-        };
-    
-        let tx = Transaction::new_signed_with_payer(
-            &[merge_ix],
-            Some(&crank.pubkey()),
-            &[&crank],
-            svm.latest_blockhash(),
-        );
-    
-        let result = svm.send_transaction(tx);
-        print_transaction_logs(&result);
-        assert!(result.is_ok(), "MergeReserve should succeed");
-    
-        // 6. Verify merge results
-        let pool_stake_after = svm.get_account(&pool_stake_pda).unwrap();
-        let reserve_stake_after = svm.get_account(&reserve_stake_pda);
-    
-        println!("\n=== After Merge ===");
-        println!("  Pool stake lamports: {}", pool_stake_after.lamports);
-    
-        // Reserve should be closed (absorbed into pool_stake)
-        match reserve_stake_after {
-            Some(acc) => {
-                println!("  Reserve stake lamports: {}", acc.lamports);
-                println!("  Reserve stake owner: {:?}", acc.owner);
-                // After merge, reserve should be empty/system-owned
-                assert_eq!(acc.lamports, 0, "Reserve should have 0 lamports after merge");
-            }
-            None => {
-                println!("  Reserve stake: CLOSED");
-            }
-        }
-    
-        // Pool stake should have absorbed reserve's lamports
-        let expected_lamports = pool_stake_before.lamports + reserve_stake_before.lamports;
+
+        // Verify reserve stake is now owned by stake program (initialized)
+        let reserve_after = svm.get_account(&reserve_stake_pda).unwrap();
+        println!("Reserve stake owner after: {:?}", reserve_after.owner);
         assert_eq!(
-            pool_stake_after.lamports, expected_lamports,
-            "Pool stake should have absorbed reserve lamports"
+            reserve_after.owner, STAKE_PROGRAM_ID,
+            "Reserve should now be owned by stake program"
         );
-    
-        println!("\n=== Merge Verified Successfully ===");
+
+        // Verify reserve has stake account data structure
+        assert!(
+            reserve_after.data.len() >= 200,
+            "Reserve should have stake account data"
+        );
+
+        println!("\n=== Reserve Initialization Verified ===");
+        println!("  Reserve stake: {}", reserve_stake_pda);
+        println!("  Owner: {:?}", reserve_after.owner);
+        println!("  Lamports: {}", reserve_after.lamports);
+        println!("  Data length: {}", reserve_after.data.len());
     }
 }

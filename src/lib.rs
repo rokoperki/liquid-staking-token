@@ -34,6 +34,11 @@ fn process_instruction(
             Initialize::try_from((data, accounts))?.process()
         }
         Some((&Deposit::DISCRIMINATOR, data)) => Deposit::try_from((data, accounts))?.process(),
+        Some((&InitializeReserve::DISCRIMINATOR, _data)) => {
+            InitializeReserve::try_from(accounts)?.process()
+        }
+        Some((&MergeReserve::DISCRIMINATOR, _data)) => MergeReserve::try_from(accounts)?.process(),
+
         _ => Err(ProgramError::InvalidInstructionData),
     }
 }

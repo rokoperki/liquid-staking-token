@@ -7,7 +7,7 @@ use pinocchio::{
     msg,
     sysvars::{Sysvar, rent::Rent},
 };
-use pinocchio_system::instructions::CreateAccount;
+use pinocchio_system::instructions::{Allocate, Assign, CreateAccount};
 
 use crate::constants::*;
 
@@ -34,6 +34,27 @@ pub fn create_stake_account<'a>(
     Ok(())
 }
 
+pub fn reinit_stake_account<'a>(stake_account: &'a AccountInfo, seeds: &[Seed]) -> ProgramResult {
+    let signer = [Signer::from(seeds)];
+
+    // Allocate 200 bytes
+    Allocate {
+        account: stake_account,
+        space: STAKE_ACCOUNT_SIZE,
+    }
+    .invoke_signed(&signer)?;
+
+    // Assign to stake program
+    Assign {
+        account: stake_account,
+        owner: &STAKE_PROGRAM_ID,
+    }
+    .invoke_signed(&signer)?;
+
+    msg!("Stake account re-prepared");
+    Ok(())
+}
+
 /// Initialize stake account with staker and withdrawer authorities (no lockup)
 pub fn initialize_stake<'a>(
     stake_account: &'a AccountInfo,
@@ -42,18 +63,18 @@ pub fn initialize_stake<'a>(
     withdrawer: &'a AccountInfo,
 ) -> ProgramResult {
     let mut data = [0u8; 116];
-    
+
     // Discriminator (0 = Initialize)
     data[0..4].copy_from_slice(&0u32.to_le_bytes());
-    
+
     // Authorized
     data[4..36].copy_from_slice(staker.key().as_ref());
     data[36..68].copy_from_slice(withdrawer.key().as_ref());
-    
+
     // Lockup (zeros = no lockup)
-    data[68..76].copy_from_slice(&0i64.to_le_bytes());  // unix_timestamp
-    data[76..84].copy_from_slice(&0u64.to_le_bytes());  // epoch
-    data[84..116].copy_from_slice(&[0u8; 32]);          // custodian
+    data[68..76].copy_from_slice(&0i64.to_le_bytes()); // unix_timestamp
+    data[76..84].copy_from_slice(&0u64.to_le_bytes()); // epoch
+    data[84..116].copy_from_slice(&[0u8; 32]); // custodian
 
     let ix = Instruction {
         program_id: &STAKE_PROGRAM_ID,

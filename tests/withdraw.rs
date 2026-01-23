@@ -423,7 +423,6 @@ mod tests {
             ],
             &PROGRAM_ID,
         );
-        svm.airdrop(&pool_stake_pda, 10_000_000_000).unwrap();
 
         let withdraw_data =
             create_withdraw_instruction_data(withdraw_amount, nonce, user_stake_bump);

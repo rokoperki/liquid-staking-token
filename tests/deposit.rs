@@ -242,7 +242,7 @@ mod tests {
 
         // Create depositor
         let depositor = Keypair::new();
-        let deposit_amount = 5_000_000u64;
+        let deposit_amount = 1_200_000_000u64;
         svm.airdrop(&depositor.pubkey(), 2_000_000_000).unwrap();
 
         // Derive and CREATE depositor's LST ATA

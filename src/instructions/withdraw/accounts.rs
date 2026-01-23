@@ -1,4 +1,4 @@
-use pinocchio::{account_info::AccountInfo, msg, program_error::ProgramError};
+use pinocchio::{account_info::AccountInfo, program_error::ProgramError};
 
 use crate::{AssociatedToken, Mint, PoolState, ProgramAccount, STAKE_PROGRAM_ID, SignerAccount};
 

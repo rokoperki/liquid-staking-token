@@ -1,5 +1,7 @@
 use pinocchio::program_error::ProgramError;
 
+use crate::{MIN_STAKE_DELEGATION, STAKE_ACCOUNT_SIZE};
+
 #[repr(C, packed)]
 pub struct DepositInstructionData {
     pub amount: u64,
@@ -15,7 +17,7 @@ impl<'a> TryFrom<&'a [u8]> for DepositInstructionData {
 
         let amount = u64::from_le_bytes(data[0..8].try_into().unwrap());
 
-        if amount == 0 {
+        if amount < (MIN_STAKE_DELEGATION + STAKE_ACCOUNT_SIZE) {
             return Err(ProgramError::InvalidInstructionData);
         }
 

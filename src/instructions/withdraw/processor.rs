@@ -1,5 +1,8 @@
 use pinocchio::{
-    account_info::AccountInfo, instruction::Seed, msg, program_error::ProgramError, sysvars::{Sysvar, rent::Rent}
+    account_info::AccountInfo,
+    instruction::Seed,
+    program_error::ProgramError,
+    sysvars::{Sysvar, rent::Rent},
 };
 use pinocchio_token::instructions::Burn;
 
@@ -94,7 +97,6 @@ impl<'a> Withdraw<'a> {
             self.calculate_sol_amount(&pool_state)?
         };
 
-
         let pool_state_data = self.accounts.pool_state.try_borrow_data()?;
         let pool_state = PoolState::load(&pool_state_data)?;
 
@@ -134,7 +136,6 @@ impl<'a> Withdraw<'a> {
             Seed::from(&nonce_bytes),
             Seed::from(&user_stake_bump_binding),
         ];
-        msg!("Creating user stake account");
 
         create_stake_account(
             self.accounts.user,
@@ -143,8 +144,6 @@ impl<'a> Withdraw<'a> {
             &user_stake_seeds,
         )?;
 
-        msg!("Splitting stake account");
-
         split_stake(
             self.accounts.pool_stake,
             self.accounts.user_stake,
@@ -152,8 +151,6 @@ impl<'a> Withdraw<'a> {
             &pool_seeds,
             sol_amount,
         )?;
-
-        msg!("Deactivating user stake account");
 
         deactivate_stake(
             self.accounts.user_stake,
@@ -182,18 +179,8 @@ impl<'a> Withdraw<'a> {
     }
 
     fn calculate_sol_amount(&self, pool: &PoolState) -> Result<u64, ProgramError> {
-        let pool_stake_sol = self
-            .accounts
-            .pool_stake
-            .lamports()
-            .saturating_sub(Rent::get()?.minimum_balance(self.accounts.pool_stake.data_len()));
-
-        let reserve_stake_sol = self
-            .accounts
-            .reserve_stake
-            .lamports()
-            .saturating_sub(Rent::get()?.minimum_balance(self.accounts.pool_stake.data_len()));
-
+        let pool_stake_sol = self.accounts.pool_stake.lamports();
+        let reserve_stake_sol = self.accounts.reserve_stake.lamports();
 
         let total_pool_value = pool_stake_sol
             .checked_add(reserve_stake_sol)

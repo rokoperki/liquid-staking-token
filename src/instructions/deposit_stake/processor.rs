@@ -101,6 +101,7 @@ impl<'a> Deposit<'a> {
     fn calculate_lst_amount(&self, pool: &PoolState) -> Result<u64, ProgramError> {
         let pool_stake_sol = self.accounts.pool_stake.lamports();
         let reserve_stake_sol = self.accounts.reserve_stake.lamports();
+
         let total_pool_value = pool_stake_sol
             .checked_add(reserve_stake_sol)
             .ok_or(ProgramError::ArithmeticOverflow)?;

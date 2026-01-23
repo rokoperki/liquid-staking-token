@@ -156,7 +156,7 @@ impl<'a> Initialize<'a> {
             self.data.stake_bump,
             self.data.mint_bump,
             self.data.reserve_bump,
-            0,
+            MIN_STAKE_DELEGATION,
             true,
         );
 

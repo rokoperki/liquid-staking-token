@@ -31,11 +31,11 @@ impl<'a> TryFrom<&'a [AccountInfo]> for MergeReserve<'a> {
             accounts.pool_state,
             pool_state.bump,
         )?;
-        if accounts.pool_stake.owner() !=  accounts.stake_program.key() {
+        if accounts.pool_stake.owner() != accounts.stake_program.key() {
             return Err(ProgramError::InvalidAccountData);
         }
 
-        if accounts.reserve_stake.owner() !=  accounts.stake_program.key() {
+        if accounts.reserve_stake.owner() != accounts.stake_program.key() {
             return Err(ProgramError::InvalidAccountData);
         }
 
@@ -66,6 +66,10 @@ impl<'a> MergeReserve<'a> {
             Seed::from(&seed_binding),
             Seed::from(&binding),
         ];
+
+        if self.accounts.reserve_stake.lamports() == 0 {
+            return Err(ProgramError::UninitializedAccount);
+        }
 
         merge_stake(
             self.accounts.pool_stake,

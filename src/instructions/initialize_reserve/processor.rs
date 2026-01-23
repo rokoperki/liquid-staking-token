@@ -71,19 +71,25 @@ impl<'a> InitializeReserve<'a> {
             Seed::from(&binding),
         ];
 
-        if self.accounts.reserve_stake.data_len() == 0 {
+        if self.accounts.reserve_stake.data_len() > 0 {
             let reserve_data = self.accounts.reserve_stake.try_borrow_data()?;
-            if reserve_data.len() >= 8 && reserve_data[4..8] != [0, 0, 0, 0] {
-                return Err(ProgramError::AccountAlreadyInitialized);
+            if reserve_data.len() >= 4 {
+                let state = u32::from_le_bytes(reserve_data[0..4].try_into().unwrap());
+                if state >= 1 {
+                    return Err(ProgramError::AccountAlreadyInitialized);
+                }
             }
-
-            let binding = [pool_state.reserve_bump];
+        }
+    
+        // Reallocate if needed (account was created with 0 space)
+        if self.accounts.reserve_stake.data_len() == 0 {
+            let reserve_bump_binding = [pool_state.reserve_bump];
             let reserve_seeds = [
                 Seed::from(b"reserve_stake"),
                 Seed::from(self.accounts.pool_state.key().as_ref()),
-                Seed::from(&binding),
+                Seed::from(&reserve_bump_binding),
             ];
-
+    
             reinit_stake_account(self.accounts.reserve_stake, &reserve_seeds)?;
         }
 

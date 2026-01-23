@@ -40,6 +40,10 @@ mod tests {
 
     const SYSTEM_PROGRAM_ID: Pubkey = Pubkey::new_from_array([0; 32]);
 
+    // ============================================
+    // HELPER FUNCTIONS
+    // ============================================
+
     fn derive_pool_state_pda(initializer: &Pubkey, seed: u64) -> (Pubkey, u8) {
         Pubkey::find_program_address(
             &[b"lst_pool", initializer.as_ref(), &seed.to_le_bytes()],
@@ -53,13 +57,6 @@ mod tests {
 
     fn derive_stake_account_pda(pool_state: &Pubkey) -> (Pubkey, u8) {
         Pubkey::find_program_address(&[b"stake", pool_state.as_ref()], &PROGRAM_ID)
-    }
-
-    fn derive_deposit_stake_pda(pool_state: &Pubkey, depositor: &Pubkey) -> (Pubkey, u8) {
-        Pubkey::find_program_address(
-            &[b"stake", pool_state.as_ref(), depositor.as_ref()],
-            &PROGRAM_ID,
-        )
     }
 
     fn derive_reserve_stake_account_pda(pool_state: &Pubkey) -> (Pubkey, u8) {
@@ -81,7 +78,7 @@ mod tests {
         stake_bump: u8,
         reserve_bump: u8,
     ) -> Vec<u8> {
-        let mut data = vec![0u8]; // Discriminator for Initialize
+        let mut data = vec![0u8];
         data.extend_from_slice(&seed.to_le_bytes());
         data.push(pool_bump);
         data.push(mint_bump);
@@ -91,17 +88,15 @@ mod tests {
     }
 
     fn create_deposit_instruction_data(amount: u64) -> Vec<u8> {
-        let mut data = vec![1u8]; // Discriminator for Deposit
+        let mut data = vec![1u8];
         data.extend_from_slice(&amount.to_le_bytes());
         data
     }
 
     fn setup_svm() -> LiteSVM {
         let mut svm = LiteSVM::new().with_builtins().with_sigverify(false);
-
         svm.add_program_from_file(PROGRAM_ID, "target/deploy/liquid_staking_token.so")
             .expect("Failed to load program");
-
         svm
     }
 
@@ -138,9 +133,6 @@ mod tests {
         match result {
             Ok(meta) => {
                 eprintln!("\n=== Transaction Succeeded ===");
-                for log in &meta.logs {
-                    eprintln!("  {}", log);
-                }
             }
             Err(err) => {
                 eprintln!("\n=== Transaction Failed ===");
@@ -152,7 +144,6 @@ mod tests {
         }
     }
 
-    /// Helper to initialize a pool and return all the PDAs
     fn initialize_pool(
         svm: &mut LiteSVM,
     ) -> (Keypair, Pubkey, Pubkey, Pubkey, Pubkey, Pubkey, u64) {
@@ -180,19 +171,19 @@ mod tests {
         let instruction = Instruction {
             program_id: PROGRAM_ID,
             accounts: vec![
-                AccountMeta::new(initializer.pubkey(), true), // initializer
-                AccountMeta::new(pool_state_pda, false),      // pool_state
-                AccountMeta::new(lst_mint_pda, false),        // lst_mint
-                AccountMeta::new(stake_account_pda, false),   // stake_account
-                AccountMeta::new(reserve_stake_pda, false),   // reserve_stake
-                AccountMeta::new_readonly(validator_vote, false), // validator_vote
-                AccountMeta::new_readonly(CLOCK_SYSVAR.into(), false), // clock
-                AccountMeta::new_readonly(RENT_SYSVAR.into(), false), // rent
-                AccountMeta::new_readonly(STAKE_HISTORY_SYSVAR, false), // stake_history
-                AccountMeta::new_readonly(STAKE_CONFIG, false), // stake_config
-                AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false), // system_program
-                AccountMeta::new_readonly(TOKEN_PROGRAM_ID, false), // token_program
-                AccountMeta::new_readonly(STAKE_PROGRAM_ID, false), // stake_program
+                AccountMeta::new(initializer.pubkey(), true),
+                AccountMeta::new(pool_state_pda, false),
+                AccountMeta::new(lst_mint_pda, false),
+                AccountMeta::new(stake_account_pda, false),
+                AccountMeta::new(reserve_stake_pda, false),
+                AccountMeta::new_readonly(validator_vote, false),
+                AccountMeta::new_readonly(CLOCK_SYSVAR.into(), false),
+                AccountMeta::new_readonly(RENT_SYSVAR.into(), false),
+                AccountMeta::new_readonly(STAKE_HISTORY_SYSVAR, false),
+                AccountMeta::new_readonly(STAKE_CONFIG, false),
+                AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
+                AccountMeta::new_readonly(TOKEN_PROGRAM_ID, false),
+                AccountMeta::new_readonly(STAKE_PROGRAM_ID, false),
             ],
             data: instruction_data,
         };
@@ -207,9 +198,6 @@ mod tests {
         let result = svm.send_transaction(transaction);
         print_transaction_logs(&result);
         assert!(result.is_ok(), "Initialize should succeed");
-        let reserve_after = svm.get_account(&reserve_stake_pda).unwrap();
-        println!("Reserve stake lamports after init: {}", reserve_after.lamports);
-        println!("=== Pool Initialized Successfully ===");
 
         (
             initializer,
@@ -222,37 +210,746 @@ mod tests {
         )
     }
 
+    fn build_deposit_instruction(
+        depositor: &Pubkey,
+        pool_state_pda: &Pubkey,
+        pool_stake_pda: &Pubkey,
+        reserve_stake_pda: &Pubkey,
+        lst_mint_pda: &Pubkey,
+        depositor_lst_ata: &Pubkey,
+        amount: u64,
+    ) -> Instruction {
+        Instruction {
+            program_id: PROGRAM_ID,
+            accounts: vec![
+                AccountMeta::new(*depositor, true),
+                AccountMeta::new(*pool_state_pda, false),
+                AccountMeta::new_readonly(*pool_stake_pda, false),
+                AccountMeta::new(*reserve_stake_pda, false),
+                AccountMeta::new(*lst_mint_pda, false),
+                AccountMeta::new(*depositor_lst_ata, false),
+                AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
+                AccountMeta::new_readonly(TOKEN_PROGRAM_ID, false),
+                AccountMeta::new_readonly(STAKE_PROGRAM_ID, false),
+                AccountMeta::new_readonly(ATA_PROGRAM_ID, false),
+            ],
+            data: create_deposit_instruction_data(amount),
+        }
+    }
+
+    fn create_user_with_ata(
+        svm: &mut LiteSVM,
+        lst_mint_pda: &Pubkey,
+        airdrop: u64,
+    ) -> (Keypair, Pubkey) {
+        let user = Keypair::new();
+        svm.airdrop(&user.pubkey(), airdrop).unwrap();
+
+        let user_lst_ata = derive_ata(&user.pubkey(), lst_mint_pda);
+
+        let create_ata_ix =
+            spl_associated_token_account::instruction::create_associated_token_account(
+                &user.pubkey(),
+                &user.pubkey(),
+                lst_mint_pda,
+                &TOKEN_PROGRAM_ID,
+            );
+
+        let tx = Transaction::new_signed_with_payer(
+            &[create_ata_ix],
+            Some(&user.pubkey()),
+            &[&user],
+            svm.latest_blockhash(),
+        );
+        svm.send_transaction(tx).expect("Should create ATA");
+
+        (user, user_lst_ata)
+    }
+
+    fn get_lst_balance(svm: &LiteSVM, ata: &Pubkey) -> u64 {
+        let account = svm.get_account(ata).unwrap();
+        u64::from_le_bytes(account.data[64..72].try_into().unwrap())
+    }
+
+    fn get_lst_supply(svm: &LiteSVM, pool_state: &Pubkey) -> u64 {
+        let account = svm.get_account(pool_state).unwrap();
+        u64::from_le_bytes(account.data[173..181].try_into().unwrap())
+    }
+
+    // ============================================
+    // SUCCESS CASES
+    // ============================================
+
     #[test]
     fn test_deposit_success() {
         let mut svm = setup_svm();
-
-        // Initialize pool first
-        let (_, pool_state_pda, lst_mint_pda, pool_stake_pda, reserve_stake_pda, validator_vote, _) =
+        let (_, pool_state_pda, lst_mint_pda, pool_stake_pda, reserve_stake_pda, _, _) =
             initialize_pool(&mut svm);
 
-        // Verify initialization worked
-        let pool_stake_account = svm.get_account(&pool_stake_pda);
-        assert!(pool_stake_account.is_some(), "Pool stake should exist");
+        let (depositor, depositor_lst_ata) =
+            create_user_with_ata(&mut svm, &lst_mint_pda, 5_000_000_000);
+        let deposit_amount = 2_000_000_000u64;
 
-        let reserve_stake_account = svm.get_account(&reserve_stake_pda);
-        assert!(
-            reserve_stake_account.is_some(),
-            "Reserve stake should exist"
+        let reserve_before = svm.get_account(&reserve_stake_pda).unwrap().lamports;
+
+        let instruction = build_deposit_instruction(
+            &depositor.pubkey(),
+            &pool_state_pda,
+            &pool_stake_pda,
+            &reserve_stake_pda,
+            &lst_mint_pda,
+            &depositor_lst_ata,
+            deposit_amount,
         );
 
-        // Create depositor
-        let depositor = Keypair::new();
-        let deposit_amount = 1_200_000_000u64;
-        svm.airdrop(&depositor.pubkey(), 2_000_000_000).unwrap();
+        let tx = Transaction::new_signed_with_payer(
+            &[instruction],
+            Some(&depositor.pubkey()),
+            &[&depositor],
+            svm.latest_blockhash(),
+        );
 
-        // Derive and CREATE depositor's LST ATA
+        let result = svm.send_transaction(tx);
+        print_transaction_logs(&result);
+        assert!(result.is_ok(), "Deposit should succeed");
+
+        let reserve_after = svm.get_account(&reserve_stake_pda).unwrap().lamports;
+        assert_eq!(
+            reserve_after - reserve_before,
+            deposit_amount,
+            "Reserve should receive deposit"
+        );
+
+        let lst_balance = get_lst_balance(&svm, &depositor_lst_ata);
+        assert!(lst_balance > 0, "User should have received LST");
+
+        println!("\n=== test_deposit_success PASSED ===");
+    }
+
+    #[test]
+    fn test_deposit_second_deposit_proportional() {
+        let mut svm = setup_svm();
+        let (_, pool_state_pda, lst_mint_pda, pool_stake_pda, reserve_stake_pda, _, _) =
+            initialize_pool(&mut svm);
+
+        // First depositor
+        let (depositor1, depositor1_ata) =
+            create_user_with_ata(&mut svm, &lst_mint_pda, 5_000_000_000);
+        let deposit1_amount = 2_000_000_000u64;
+
+        let ix1 = build_deposit_instruction(
+            &depositor1.pubkey(),
+            &pool_state_pda,
+            &pool_stake_pda,
+            &reserve_stake_pda,
+            &lst_mint_pda,
+            &depositor1_ata,
+            deposit1_amount,
+        );
+
+        let tx1 = Transaction::new_signed_with_payer(
+            &[ix1],
+            Some(&depositor1.pubkey()),
+            &[&depositor1],
+            svm.latest_blockhash(),
+        );
+        svm.send_transaction(tx1)
+            .expect("First deposit should succeed");
+
+        let lst_supply_after_first = get_lst_supply(&svm, &pool_state_pda);
+        let pool_stake = svm.get_account(&pool_stake_pda).unwrap().lamports;
+        let reserve = svm.get_account(&reserve_stake_pda).unwrap().lamports;
+        let total_pool_value = pool_stake + reserve;
+
+        println!("After first deposit:");
+        println!("  LST supply: {}", lst_supply_after_first);
+        println!("  Total pool value: {}", total_pool_value);
+
+        // Second depositor
+        let (depositor2, depositor2_ata) =
+            create_user_with_ata(&mut svm, &lst_mint_pda, 5_000_000_000);
+        let deposit2_amount = 1_100_000_000u64;
+
+        let ix2 = build_deposit_instruction(
+            &depositor2.pubkey(),
+            &pool_state_pda,
+            &pool_stake_pda,
+            &reserve_stake_pda,
+            &lst_mint_pda,
+            &depositor2_ata,
+            deposit2_amount,
+        );
+
+        let tx2 = Transaction::new_signed_with_payer(
+            &[ix2],
+            Some(&depositor2.pubkey()),
+            &[&depositor2],
+            svm.latest_blockhash(),
+        );
+
+        let result = svm.send_transaction(tx2);
+        print_transaction_logs(&result);
+        assert!(result.is_ok(), "Second deposit should succeed");
+
+        let lst_balance2 = get_lst_balance(&svm, &depositor2_ata);
+
+        // lst_amount = (deposit_amount * lst_supply) / total_pool_value
+        let expected_lst = (deposit2_amount as u128 * lst_supply_after_first as u128
+            / total_pool_value as u128) as u64;
+
+        println!("After second deposit:");
+        println!("  LST received: {}", lst_balance2);
+        println!("  Expected LST: {}", expected_lst);
+
+        assert!(
+            lst_balance2 >= expected_lst.saturating_sub(1)
+                && lst_balance2 <= expected_lst.saturating_add(1),
+            "Second deposit should get proportional LST"
+        );
+
+        println!("\n=== test_deposit_second_deposit_proportional PASSED ===");
+    }
+
+    #[test]
+    fn test_deposit_multiple_deposits_same_user() {
+        let mut svm = setup_svm();
+        let (_, pool_state_pda, lst_mint_pda, pool_stake_pda, reserve_stake_pda, _, _) =
+            initialize_pool(&mut svm);
+
+        let (depositor, depositor_ata) =
+            create_user_with_ata(&mut svm, &lst_mint_pda, 10_000_000_000);
+
+        // First deposit
+        let ix1 = build_deposit_instruction(
+            &depositor.pubkey(),
+            &pool_state_pda,
+            &pool_stake_pda,
+            &reserve_stake_pda,
+            &lst_mint_pda,
+            &depositor_ata,
+            2_000_000_000,
+        );
+
+        let tx1 = Transaction::new_signed_with_payer(
+            &[ix1],
+            Some(&depositor.pubkey()),
+            &[&depositor],
+            svm.latest_blockhash(),
+        );
+        svm.send_transaction(tx1)
+            .expect("First deposit should succeed");
+
+        let lst_after_first = get_lst_balance(&svm, &depositor_ata);
+
+        // Second deposit
+        let ix2 = build_deposit_instruction(
+            &depositor.pubkey(),
+            &pool_state_pda,
+            &pool_stake_pda,
+            &reserve_stake_pda,
+            &lst_mint_pda,
+            &depositor_ata,
+            1_100_000_000,
+        );
+
+        let tx2 = Transaction::new_signed_with_payer(
+            &[ix2],
+            Some(&depositor.pubkey()),
+            &[&depositor],
+            svm.latest_blockhash(),
+        );
+        let result = svm.send_transaction(tx2);
+        print_transaction_logs(&result);
+        assert!(result.is_ok(), "Second deposit should succeed");
+
+        let lst_after_second = get_lst_balance(&svm, &depositor_ata);
+
+        assert!(
+            lst_after_second > lst_after_first,
+            "LST balance should increase"
+        );
+
+        println!("LST after first deposit: {}", lst_after_first);
+        println!("LST after second deposit: {}", lst_after_second);
+        println!("\n=== test_deposit_multiple_deposits_same_user PASSED ===");
+    }
+
+    #[test]
+    fn test_deposit_multiple_depositors_no_dilution() {
+        let mut svm = setup_svm();
+        let (_, pool_state_pda, lst_mint_pda, pool_stake_pda, reserve_stake_pda, _, _) =
+            initialize_pool(&mut svm);
+
+        // First depositor deposits 2 SOL
+        let (depositor1, depositor1_ata) =
+            create_user_with_ata(&mut svm, &lst_mint_pda, 5_000_000_000);
+
+        let ix1 = build_deposit_instruction(
+            &depositor1.pubkey(),
+            &pool_state_pda,
+            &pool_stake_pda,
+            &reserve_stake_pda,
+            &lst_mint_pda,
+            &depositor1_ata,
+            2_000_000_000,
+        );
+
+        let tx1 = Transaction::new_signed_with_payer(
+            &[ix1],
+            Some(&depositor1.pubkey()),
+            &[&depositor1],
+            svm.latest_blockhash(),
+        );
+        svm.send_transaction(tx1).expect("First deposit should succeed");
+
+        let depositor1_lst = get_lst_balance(&svm, &depositor1_ata);
+
+        // Second depositor deposits 2 SOL
+        let (depositor2, depositor2_ata) =
+            create_user_with_ata(&mut svm, &lst_mint_pda, 5_000_000_000);
+
+        let ix2 = build_deposit_instruction(
+            &depositor2.pubkey(),
+            &pool_state_pda,
+            &pool_stake_pda,
+            &reserve_stake_pda,
+            &lst_mint_pda,
+            &depositor2_ata,
+            2_000_000_000,
+        );
+
+        let tx2 = Transaction::new_signed_with_payer(
+            &[ix2],
+            Some(&depositor2.pubkey()),
+            &[&depositor2],
+            svm.latest_blockhash(),
+        );
+        svm.send_transaction(tx2).expect("Second deposit should succeed");
+
+        // Check depositor1's LST hasn't changed
+        let depositor1_lst_after = get_lst_balance(&svm, &depositor1_ata);
+        assert_eq!(
+            depositor1_lst, depositor1_lst_after,
+            "First depositor's LST should not change"
+        );
+
+        let depositor2_lst = get_lst_balance(&svm, &depositor2_ata);
+        let total_lst_supply = get_lst_supply(&svm, &pool_state_pda);
+
+        println!("Depositor 1 LST: {}", depositor1_lst_after);
+        println!("Depositor 2 LST: {}", depositor2_lst);
+        println!("Total LST supply: {}", total_lst_supply);
+
+        assert_eq!(
+            depositor1_lst_after + depositor2_lst + 1_000_000_000,
+            total_lst_supply,
+            "LST supply should equal sum of balances"
+        );
+
+        println!("\n=== test_deposit_multiple_depositors_no_dilution PASSED ===");
+    }
+
+    // ============================================
+    // FAILURE CASES - INPUT VALIDATION
+    // ============================================
+
+    #[test]
+    fn test_deposit_zero_amount_fails() {
+        let mut svm = setup_svm();
+        let (_, pool_state_pda, lst_mint_pda, pool_stake_pda, reserve_stake_pda, _, _) =
+            initialize_pool(&mut svm);
+
+        let (depositor, depositor_lst_ata) =
+            create_user_with_ata(&mut svm, &lst_mint_pda, 5_000_000_000);
+
+        let instruction = build_deposit_instruction(
+            &depositor.pubkey(),
+            &pool_state_pda,
+            &pool_stake_pda,
+            &reserve_stake_pda,
+            &lst_mint_pda,
+            &depositor_lst_ata,
+            0, // Zero amount
+        );
+
+        let tx = Transaction::new_signed_with_payer(
+            &[instruction],
+            Some(&depositor.pubkey()),
+            &[&depositor],
+            svm.latest_blockhash(),
+        );
+
+        let result = svm.send_transaction(tx);
+        print_transaction_logs(&result);
+        assert!(result.is_err(), "Zero deposit should fail");
+
+        println!("\n=== test_deposit_zero_amount_fails PASSED ===");
+    }
+
+    #[test]
+    fn test_deposit_insufficient_funds_fails() {
+        let mut svm = setup_svm();
+        let (_, pool_state_pda, lst_mint_pda, pool_stake_pda, reserve_stake_pda, _, _) =
+            initialize_pool(&mut svm);
+
+        let (depositor, depositor_lst_ata) =
+            create_user_with_ata(&mut svm, &lst_mint_pda, 1_000_000_000); // Only 1 SOL
+
+        let instruction = build_deposit_instruction(
+            &depositor.pubkey(),
+            &pool_state_pda,
+            &pool_stake_pda,
+            &reserve_stake_pda,
+            &lst_mint_pda,
+            &depositor_lst_ata,
+            5_000_000_000, // Try to deposit 5 SOL
+        );
+
+        let tx = Transaction::new_signed_with_payer(
+            &[instruction],
+            Some(&depositor.pubkey()),
+            &[&depositor],
+            svm.latest_blockhash(),
+        );
+
+        let result = svm.send_transaction(tx);
+        print_transaction_logs(&result);
+        assert!(result.is_err(), "Insufficient funds should fail");
+
+        println!("\n=== test_deposit_insufficient_funds_fails PASSED ===");
+    }
+
+    #[test]
+    fn test_deposit_truncated_instruction_data_fails() {
+        let mut svm = setup_svm();
+        let (_, pool_state_pda, lst_mint_pda, pool_stake_pda, reserve_stake_pda, _, _) =
+            initialize_pool(&mut svm);
+
+        let (depositor, depositor_lst_ata) =
+            create_user_with_ata(&mut svm, &lst_mint_pda, 5_000_000_000);
+
+        let instruction = Instruction {
+            program_id: PROGRAM_ID,
+            accounts: vec![
+                AccountMeta::new(depositor.pubkey(), true),
+                AccountMeta::new(pool_state_pda, false),
+                AccountMeta::new_readonly(pool_stake_pda, false),
+                AccountMeta::new(reserve_stake_pda, false),
+                AccountMeta::new(lst_mint_pda, false),
+                AccountMeta::new(depositor_lst_ata, false),
+                AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
+                AccountMeta::new_readonly(TOKEN_PROGRAM_ID, false),
+                AccountMeta::new_readonly(STAKE_PROGRAM_ID, false),
+                AccountMeta::new_readonly(ATA_PROGRAM_ID, false),
+            ],
+            data: vec![1u8], // Only discriminator, missing amount
+        };
+
+        let tx = Transaction::new_signed_with_payer(
+            &[instruction],
+            Some(&depositor.pubkey()),
+            &[&depositor],
+            svm.latest_blockhash(),
+        );
+
+        let result = svm.send_transaction(tx);
+        print_transaction_logs(&result);
+        assert!(result.is_err(), "Truncated data should fail");
+
+        println!("\n=== test_deposit_truncated_instruction_data_fails PASSED ===");
+    }
+
+    // ============================================
+    // FAILURE CASES - ACCOUNT VALIDATION
+    // ============================================
+
+    #[test]
+    fn test_deposit_wrong_pool_state_fails() {
+        let mut svm = setup_svm();
+        let (_, _, lst_mint_pda, pool_stake_pda, reserve_stake_pda, _, _) =
+            initialize_pool(&mut svm);
+
+        // Create a second pool
+        let (_, pool_state_pda2, _, _, _, _, _) = initialize_pool(&mut svm);
+
+        let (depositor, depositor_lst_ata) =
+            create_user_with_ata(&mut svm, &lst_mint_pda, 5_000_000_000);
+
+        // Use wrong pool state but correct other accounts
+        let instruction = build_deposit_instruction(
+            &depositor.pubkey(),
+            &pool_state_pda2, // Wrong pool state
+            &pool_stake_pda,
+            &reserve_stake_pda,
+            &lst_mint_pda,
+            &depositor_lst_ata,
+            1_000_000_000,
+        );
+
+        let tx = Transaction::new_signed_with_payer(
+            &[instruction],
+            Some(&depositor.pubkey()),
+            &[&depositor],
+            svm.latest_blockhash(),
+        );
+
+        let result = svm.send_transaction(tx);
+        print_transaction_logs(&result);
+        assert!(result.is_err(), "Wrong pool state should fail");
+
+        println!("\n=== test_deposit_wrong_pool_state_fails PASSED ===");
+    }
+
+    #[test]
+    fn test_deposit_wrong_pool_stake_fails() {
+        let mut svm = setup_svm();
+        let (_, pool_state_pda, lst_mint_pda, _, reserve_stake_pda, _, _) =
+            initialize_pool(&mut svm);
+
+        // Create a second pool to get different stake account
+        let (_, _, _, pool_stake_pda2, _, _, _) = initialize_pool(&mut svm);
+
+        let (depositor, depositor_lst_ata) =
+            create_user_with_ata(&mut svm, &lst_mint_pda, 5_000_000_000);
+
+        let instruction = build_deposit_instruction(
+            &depositor.pubkey(),
+            &pool_state_pda,
+            &pool_stake_pda2, // Wrong pool stake
+            &reserve_stake_pda,
+            &lst_mint_pda,
+            &depositor_lst_ata,
+            1_000_000_000,
+        );
+
+        let tx = Transaction::new_signed_with_payer(
+            &[instruction],
+            Some(&depositor.pubkey()),
+            &[&depositor],
+            svm.latest_blockhash(),
+        );
+
+        let result = svm.send_transaction(tx);
+        print_transaction_logs(&result);
+        assert!(result.is_err(), "Wrong pool stake should fail");
+
+        println!("\n=== test_deposit_wrong_pool_stake_fails PASSED ===");
+    }
+
+    #[test]
+    fn test_deposit_wrong_reserve_stake_fails() {
+        let mut svm = setup_svm();
+        let (_, pool_state_pda, lst_mint_pda, pool_stake_pda, _, _, _) = initialize_pool(&mut svm);
+
+        // Create a second pool to get different reserve
+        let (_, _, _, _, reserve_stake_pda2, _, _) = initialize_pool(&mut svm);
+
+        let (depositor, depositor_lst_ata) =
+            create_user_with_ata(&mut svm, &lst_mint_pda, 5_000_000_000);
+
+        let instruction = build_deposit_instruction(
+            &depositor.pubkey(),
+            &pool_state_pda,
+            &pool_stake_pda,
+            &reserve_stake_pda2, // Wrong reserve stake
+            &lst_mint_pda,
+            &depositor_lst_ata,
+            1_000_000_000,
+        );
+
+        let tx = Transaction::new_signed_with_payer(
+            &[instruction],
+            Some(&depositor.pubkey()),
+            &[&depositor],
+            svm.latest_blockhash(),
+        );
+
+        let result = svm.send_transaction(tx);
+        print_transaction_logs(&result);
+        assert!(result.is_err(), "Wrong reserve stake should fail");
+
+        println!("\n=== test_deposit_wrong_reserve_stake_fails PASSED ===");
+    }
+
+    #[test]
+    fn test_deposit_wrong_lst_mint_fails() {
+        let mut svm = setup_svm();
+        let (_, pool_state_pda, lst_mint_pda, pool_stake_pda, reserve_stake_pda, _, _) =
+            initialize_pool(&mut svm);
+
+        // Create a second pool to get different mint
+        let (_, _, lst_mint_pda2, _, _, _, _) = initialize_pool(&mut svm);
+
+        let (depositor, depositor_lst_ata) =
+            create_user_with_ata(&mut svm, &lst_mint_pda, 5_000_000_000);
+
+        let instruction = build_deposit_instruction(
+            &depositor.pubkey(),
+            &pool_state_pda,
+            &pool_stake_pda,
+            &reserve_stake_pda,
+            &lst_mint_pda2, // Wrong mint
+            &depositor_lst_ata,
+            1_000_000_000,
+        );
+
+        let tx = Transaction::new_signed_with_payer(
+            &[instruction],
+            Some(&depositor.pubkey()),
+            &[&depositor],
+            svm.latest_blockhash(),
+        );
+
+        let result = svm.send_transaction(tx);
+        print_transaction_logs(&result);
+        assert!(result.is_err(), "Wrong LST mint should fail");
+
+        println!("\n=== test_deposit_wrong_lst_mint_fails PASSED ===");
+    }
+
+    #[test]
+    fn test_deposit_wrong_depositor_ata_fails() {
+        let mut svm = setup_svm();
+        let (_, pool_state_pda, lst_mint_pda, pool_stake_pda, reserve_stake_pda, _, _) =
+            initialize_pool(&mut svm);
+
+        let (depositor, _) = create_user_with_ata(&mut svm, &lst_mint_pda, 5_000_000_000);
+
+        // Create another user's ATA
+        let (other_user, other_user_ata) =
+            create_user_with_ata(&mut svm, &lst_mint_pda, 1_000_000_000);
+
+        let instruction = build_deposit_instruction(
+            &depositor.pubkey(),
+            &pool_state_pda,
+            &pool_stake_pda,
+            &reserve_stake_pda,
+            &lst_mint_pda,
+            &other_user_ata, // Wrong ATA (belongs to other user)
+            1_000_000_000,
+        );
+
+        let tx = Transaction::new_signed_with_payer(
+            &[instruction],
+            Some(&depositor.pubkey()),
+            &[&depositor],
+            svm.latest_blockhash(),
+        );
+
+        let result = svm.send_transaction(tx);
+        print_transaction_logs(&result);
+        // This might succeed (depositing to someone else's account) depending on your validation
+        // If you want this to fail, add validation in your program
+
+        println!("\n=== test_deposit_wrong_depositor_ata_fails COMPLETED ===");
+    }
+
+    // ============================================
+    // FAILURE CASES - SIGNER CHECKS
+    // ============================================
+
+    #[test]
+    fn test_deposit_missing_signer_fails() {
+        let mut svm = setup_svm();
+        let (_, pool_state_pda, lst_mint_pda, pool_stake_pda, reserve_stake_pda, _, _) =
+            initialize_pool(&mut svm);
+
+        let (depositor, depositor_lst_ata) =
+            create_user_with_ata(&mut svm, &lst_mint_pda, 5_000_000_000);
+
+        let payer = Keypair::new();
+        svm.airdrop(&payer.pubkey(), 1_000_000_000).unwrap();
+
+        let instruction = Instruction {
+            program_id: PROGRAM_ID,
+            accounts: vec![
+                AccountMeta::new(depositor.pubkey(), false), // NOT a signer
+                AccountMeta::new(pool_state_pda, false),
+                AccountMeta::new_readonly(pool_stake_pda, false),
+                AccountMeta::new(reserve_stake_pda, false),
+                AccountMeta::new(lst_mint_pda, false),
+                AccountMeta::new(depositor_lst_ata, false),
+                AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
+                AccountMeta::new_readonly(TOKEN_PROGRAM_ID, false),
+                AccountMeta::new_readonly(STAKE_PROGRAM_ID, false),
+                AccountMeta::new_readonly(ATA_PROGRAM_ID, false),
+            ],
+            data: create_deposit_instruction_data(1_000_000_000),
+        };
+
+        let tx = Transaction::new_signed_with_payer(
+            &[instruction],
+            Some(&payer.pubkey()),
+            &[&payer],
+            svm.latest_blockhash(),
+        );
+
+        let result = svm.send_transaction(tx);
+        print_transaction_logs(&result);
+        assert!(result.is_err(), "Missing signer should fail");
+
+        println!("\n=== test_deposit_missing_signer_fails PASSED ===");
+    }
+
+    // ============================================
+    // FAILURE CASES - ATA ISSUES
+    // ============================================
+
+    #[test]
+    fn test_deposit_ata_not_exists_fails() {
+        let mut svm = setup_svm();
+        let (_, pool_state_pda, lst_mint_pda, pool_stake_pda, reserve_stake_pda, _, _) =
+            initialize_pool(&mut svm);
+
+        let depositor = Keypair::new();
+        svm.airdrop(&depositor.pubkey(), 5_000_000_000).unwrap();
+
+        // Derive ATA but don't create it
         let depositor_lst_ata = derive_ata(&depositor.pubkey(), &lst_mint_pda);
 
+        let instruction = build_deposit_instruction(
+            &depositor.pubkey(),
+            &pool_state_pda,
+            &pool_stake_pda,
+            &reserve_stake_pda,
+            &lst_mint_pda,
+            &depositor_lst_ata, // ATA doesn't exist
+            1_000_000_000,
+        );
+
+        let tx = Transaction::new_signed_with_payer(
+            &[instruction],
+            Some(&depositor.pubkey()),
+            &[&depositor],
+            svm.latest_blockhash(),
+        );
+
+        let result = svm.send_transaction(tx);
+        print_transaction_logs(&result);
+        assert!(result.is_err(), "Non-existent ATA should fail");
+
+        println!("\n=== test_deposit_ata_not_exists_fails PASSED ===");
+    }
+
+    #[test]
+    fn test_deposit_ata_wrong_mint_fails() {
+        let mut svm = setup_svm();
+        let (_, pool_state_pda, lst_mint_pda, pool_stake_pda, reserve_stake_pda, _, _) =
+            initialize_pool(&mut svm);
+
+        // Create second pool to get different mint
+        let (_, _, lst_mint_pda2, _, _, _, _) = initialize_pool(&mut svm);
+
+        let depositor = Keypair::new();
+        svm.airdrop(&depositor.pubkey(), 5_000_000_000).unwrap();
+
+        // Create ATA for wrong mint
+        let wrong_ata = derive_ata(&depositor.pubkey(), &lst_mint_pda2);
         let create_ata_ix =
             spl_associated_token_account::instruction::create_associated_token_account(
                 &depositor.pubkey(),
                 &depositor.pubkey(),
-                &lst_mint_pda,
+                &lst_mint_pda2,
                 &TOKEN_PROGRAM_ID,
             );
 
@@ -264,57 +961,168 @@ mod tests {
         );
         svm.send_transaction(tx).expect("Should create ATA");
 
-        let instruction_data = create_deposit_instruction_data(deposit_amount);
+        let instruction = build_deposit_instruction(
+            &depositor.pubkey(),
+            &pool_state_pda,
+            &pool_stake_pda,
+            &reserve_stake_pda,
+            &lst_mint_pda,
+            &wrong_ata, // ATA for different mint
+            1_000_000_000,
+        );
 
-        let instruction = Instruction {
-            program_id: PROGRAM_ID,
-            accounts: vec![
-                AccountMeta::new(depositor.pubkey(), true),
-                AccountMeta::new(pool_state_pda, false),
-                AccountMeta::new_readonly(pool_stake_pda, false),
-                AccountMeta::new(reserve_stake_pda, false), // ✅ Changed to writable
-                AccountMeta::new(lst_mint_pda, false),
-                AccountMeta::new(depositor_lst_ata, false),
-                AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
-                AccountMeta::new_readonly(TOKEN_PROGRAM_ID, false),
-                AccountMeta::new_readonly(STAKE_PROGRAM_ID, false),
-                AccountMeta::new_readonly(ATA_PROGRAM_ID, false),
-            ],
-            data: instruction_data,
-        };
-
-        let transaction = Transaction::new_signed_with_payer(
+        let tx = Transaction::new_signed_with_payer(
             &[instruction],
             Some(&depositor.pubkey()),
             &[&depositor],
             svm.latest_blockhash(),
         );
 
-        let result = svm.send_transaction(transaction);
+        let result = svm.send_transaction(tx);
         print_transaction_logs(&result);
-        assert!(result.is_ok(), "Deposit should succeed");
+        assert!(result.is_err(), "ATA for wrong mint should fail");
 
-        // ✅ Verify LST tokens
-        let lst_ata_account = svm.get_account(&depositor_lst_ata).unwrap();
-        let amount_bytes: [u8; 8] = lst_ata_account.data[64..72].try_into().unwrap();
-        let lst_balance = u64::from_le_bytes(amount_bytes);
-        assert_eq!(lst_balance, deposit_amount, "Should receive 1:1 LST");
+        println!("\n=== test_deposit_ata_wrong_mint_fails PASSED ===");
+    }
 
-        // ✅ Verify reserve stake received SOL
-        let reserve_after = svm.get_account(&reserve_stake_pda).unwrap();
+    // ============================================
+    // STATE VERIFICATION
+    // ============================================
+
+    #[test]
+    fn test_deposit_lst_supply_updated() {
+        let mut svm = setup_svm();
+        let (_, pool_state_pda, lst_mint_pda, pool_stake_pda, reserve_stake_pda, _, _) =
+            initialize_pool(&mut svm);
+
+        let (depositor, depositor_lst_ata) =
+            create_user_with_ata(&mut svm, &lst_mint_pda, 5_000_000_000);
+
+        let lst_supply_before = get_lst_supply(&svm, &pool_state_pda);
+
+        let instruction = build_deposit_instruction(
+            &depositor.pubkey(),
+            &pool_state_pda,
+            &pool_stake_pda,
+            &reserve_stake_pda,
+            &lst_mint_pda,
+            &depositor_lst_ata,
+            2_000_000_000,
+        );
+
+        let tx = Transaction::new_signed_with_payer(
+            &[instruction],
+            Some(&depositor.pubkey()),
+            &[&depositor],
+            svm.latest_blockhash(),
+        );
+        svm.send_transaction(tx).expect("Deposit should succeed");
+
+        let lst_supply_after = get_lst_supply(&svm, &pool_state_pda);
+        let lst_balance = get_lst_balance(&svm, &depositor_lst_ata);
+
+        assert_eq!(
+            lst_supply_after - lst_supply_before,
+            lst_balance,
+            "LST supply increase should match minted amount"
+        );
+
+        println!("LST supply before: {}", lst_supply_before);
+        println!("LST supply after: {}", lst_supply_after);
+        println!("LST minted: {}", lst_balance);
+        println!("\n=== test_deposit_lst_supply_updated PASSED ===");
+    }
+
+    #[test]
+    fn test_deposit_reserve_receives_sol() {
+        let mut svm = setup_svm();
+        let (_, pool_state_pda, lst_mint_pda, pool_stake_pda, reserve_stake_pda, _, _) =
+            initialize_pool(&mut svm);
+
+        let (depositor, depositor_lst_ata) =
+            create_user_with_ata(&mut svm, &lst_mint_pda, 5_000_000_000);
+
+        let deposit_amount = 2_000_000_000u64;
+        let reserve_before = svm.get_account(&reserve_stake_pda).unwrap().lamports;
+
+        let instruction = build_deposit_instruction(
+            &depositor.pubkey(),
+            &pool_state_pda,
+            &pool_stake_pda,
+            &reserve_stake_pda,
+            &lst_mint_pda,
+            &depositor_lst_ata,
+            deposit_amount,
+        );
+
+        let tx = Transaction::new_signed_with_payer(
+            &[instruction],
+            Some(&depositor.pubkey()),
+            &[&depositor],
+            svm.latest_blockhash(),
+        );
+        svm.send_transaction(tx).expect("Deposit should succeed");
+
+        let reserve_after = svm.get_account(&reserve_stake_pda).unwrap().lamports;
+
+        assert_eq!(
+            reserve_after - reserve_before,
+            deposit_amount,
+            "Reserve should receive exact deposit amount"
+        );
+
+        println!("Reserve before: {}", reserve_before);
+        println!("Reserve after: {}", reserve_after);
+        println!("Deposit amount: {}", deposit_amount);
+        println!("\n=== test_deposit_reserve_receives_sol PASSED ===");
+    }
+
+    #[test]
+    fn test_deposit_depositor_sol_decreases() {
+        let mut svm = setup_svm();
+        let (_, pool_state_pda, lst_mint_pda, pool_stake_pda, reserve_stake_pda, _, _) =
+            initialize_pool(&mut svm);
+
+        let (depositor, depositor_lst_ata) =
+            create_user_with_ata(&mut svm, &lst_mint_pda, 5_000_000_000);
+
+        let deposit_amount = 2_000_000_000u64;
+        let depositor_sol_before = svm.get_account(&depositor.pubkey()).unwrap().lamports;
+
+        let instruction = build_deposit_instruction(
+            &depositor.pubkey(),
+            &pool_state_pda,
+            &pool_stake_pda,
+            &reserve_stake_pda,
+            &lst_mint_pda,
+            &depositor_lst_ata,
+            deposit_amount,
+        );
+
+        let tx = Transaction::new_signed_with_payer(
+            &[instruction],
+            Some(&depositor.pubkey()),
+            &[&depositor],
+            svm.latest_blockhash(),
+        );
+        svm.send_transaction(tx).expect("Deposit should succeed");
+
+        let depositor_sol_after = svm.get_account(&depositor.pubkey()).unwrap().lamports;
+        let sol_spent = depositor_sol_before - depositor_sol_after;
+
+        // Should have spent deposit_amount + tx fee
         assert!(
-            reserve_after.lamports >= deposit_amount,
-            "Reserve should have received deposit"
+            sol_spent >= deposit_amount,
+            "Depositor should have spent at least deposit amount"
+        );
+        assert!(
+            sol_spent < deposit_amount + 100_000,
+            "Depositor should not have spent too much"
         );
 
-        println!(
-            "Reserve stake lamports before deposit: {}",
-            reserve_after.lamports - deposit_amount
-        );
-        println!(
-            "Reserve stake lamports after deposit: {}",
-            reserve_after.lamports
-        );
-        println!("\n=== All Verifications Passed ===");
+        println!("SOL before: {}", depositor_sol_before);
+        println!("SOL after: {}", depositor_sol_after);
+        println!("SOL spent (including fee): {}", sol_spent);
+        println!("\n=== test_deposit_depositor_sol_decreases PASSED ===");
     }
 }

@@ -255,7 +255,7 @@ pub fn split_stake<'a>(
 
     pinocchio::program::invoke_signed(&ix, &[destination, source, staker], &signer)?;
 
-    msg!("Stakes merged");
+    msg!("Stakes Splited");
     Ok(())
 }
 

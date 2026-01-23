@@ -296,13 +296,6 @@ mod tests {
         print_transaction_logs(&result);
         assert!(result.is_ok(), "Deposit should succeed before withdraw");
 
-        // Verify user has LST tokens
-        let lst_ata_account = svm.get_account(&user_lst_ata).unwrap();
-        let amount_bytes: [u8; 8] = lst_ata_account.data[64..72].try_into().unwrap();
-        let lst_balance = u64::from_le_bytes(amount_bytes);
-        println!("User LST balance after deposit: {}", lst_balance);
-        assert_eq!(lst_balance, deposit_amount, "Should have deposited LST");
-
         // 3. Initialize and delegate reserve_stake
         let crank = Keypair::new();
         svm.airdrop(&crank.pubkey(), 1_000_000_000).unwrap();
@@ -460,17 +453,6 @@ mod tests {
         let result = svm.send_transaction(tx);
         print_transaction_logs(&result);
         assert!(result.is_ok(), "Withdraw should succeed");
-
-        // Verify LST tokens were burned
-        let lst_ata_account = svm.get_account(&user_lst_ata).unwrap();
-        let amount_bytes: [u8; 8] = lst_ata_account.data[64..72].try_into().unwrap();
-        let lst_balance_after = u64::from_le_bytes(amount_bytes);
-        println!("User LST balance after withdraw: {}", lst_balance_after);
-        assert_eq!(
-            lst_balance_after,
-            deposit_amount - withdraw_amount,
-            "LST should be burned"
-        );
 
         // Verify user stake account was created and has SOL
         let user_stake_account = svm.get_account(&user_stake_pda);

@@ -7,7 +7,7 @@ use pinocchio::{
     sysvars::{Sysvar, rent::Rent},
 };
 use pinocchio_system::instructions::CreateAccount;
-use pinocchio_token::instructions::InitializeMint2;
+use pinocchio_token::instructions::{InitializeMint2};
 
 use super::{InitializeAccounts, InitializeData};
 use crate::{

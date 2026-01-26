@@ -28,7 +28,7 @@ Creates a new staking pool.
 - `reserve_stake` (mut) - Reserve for collecting deposits
 - `validator_vote` - Validator vote account to delegate to
 - Sysvars: clock, rent, stake_history, stake_config
-- Programs: system, token, stake
+- Programs: system, token, stake, ata
 
 **Data:** `seed (u64) | pool_bump (u8) | mint_bump (u8) | stake_bump (u8) | reserve_bump (u8)`
 
@@ -46,7 +46,7 @@ Deposit SOL to receive LST tokens.
 - `reserve_stake` (mut) - Receives deposited SOL
 - `lst_mint` (mut) - Mint LST to depositor
 - `depositor_lst_ata` (mut) - Receives LST tokens
-- Programs: system, token
+- Programs: system, token, stake, ata
 
 **Data:** `amount (u64)`
 

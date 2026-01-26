@@ -7,6 +7,7 @@ use crate::{
 
 pub struct InitializeAccounts<'a> {
     pub initializer: &'a AccountInfo,
+    pub initializer_lst_ata: &'a AccountInfo,
     pub pool_state: &'a AccountInfo,
     pub lst_mint: &'a AccountInfo,
     pub stake_account: &'a AccountInfo,
@@ -19,6 +20,7 @@ pub struct InitializeAccounts<'a> {
     pub system_program: &'a AccountInfo,
     pub token_program: &'a AccountInfo,
     pub stake_program: &'a AccountInfo,
+    pub ata_program: &'a AccountInfo,
 }
 
 impl<'a> TryFrom<&'a [AccountInfo]> for InitializeAccounts<'a> {
@@ -27,6 +29,7 @@ impl<'a> TryFrom<&'a [AccountInfo]> for InitializeAccounts<'a> {
     fn try_from(accounts: &'a [AccountInfo]) -> Result<Self, Self::Error> {
         let [
             initializer,
+            initializer_lst_ata,
             pool_state,
             lst_mint,
             stake_account,
@@ -39,6 +42,7 @@ impl<'a> TryFrom<&'a [AccountInfo]> for InitializeAccounts<'a> {
             system_program,
             token_program,
             stake_program,
+            ata_program,
         ] = accounts
         else {
             return Err(ProgramError::NotEnoughAccountKeys);
@@ -47,6 +51,7 @@ impl<'a> TryFrom<&'a [AccountInfo]> for InitializeAccounts<'a> {
         SignerAccount::check(initializer)?;
         ProgramAccount::check_system_program(system_program)?;
         ProgramAccount::check_token_program(token_program)?;
+        ProgramAccount::check_ata_program(ata_program)?;
 
         if stake_program.key() != &STAKE_PROGRAM_ID {
             return Err(ProgramError::IncorrectProgramId);
@@ -58,6 +63,7 @@ impl<'a> TryFrom<&'a [AccountInfo]> for InitializeAccounts<'a> {
 
         Ok(Self {
             initializer,
+            initializer_lst_ata,
             pool_state,
             lst_mint,
             stake_account,
@@ -70,6 +76,7 @@ impl<'a> TryFrom<&'a [AccountInfo]> for InitializeAccounts<'a> {
             system_program,
             token_program,
             stake_program,
+            ata_program,
         })
     }
 }

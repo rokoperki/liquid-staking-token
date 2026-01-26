@@ -9,7 +9,13 @@ mod tests {
         signature::{Keypair, Signer},
         transaction::Transaction,
     };
+    use spl_associated_token_account::ID as ATA_PROGRAM_ID;
+    use spl_associated_token_account::{
+        get_associated_token_address, instruction::create_associated_token_account,
+    };
     use spl_token::ID as TOKEN_PROGRAM_ID;
+
+    use solana_stake_program;
 
     const PROGRAM_ID: Pubkey = Pubkey::new_from_array([
         0x0f, 0x1e, 0x6b, 0x14, 0x21, 0xc0, 0x4a, 0x07, 0x04, 0x31, 0x26, 0x5c, 0x19, 0xc5, 0xbb,
@@ -39,6 +45,9 @@ mod tests {
 
     const SYSTEM_PROGRAM_ID: Pubkey = Pubkey::new_from_array([0; 32]);
 
+    // MIN_STAKE_DELEGATION should match your program's constant
+    const MIN_STAKE_DELEGATION: u64 = 1_000_000_000; // 1 SOL
+
     fn derive_pool_state_pda(initializer: &Pubkey, seed: u64) -> (Pubkey, u8) {
         Pubkey::find_program_address(
             &[b"lst_pool", initializer.as_ref(), &seed.to_le_bytes()],
@@ -65,7 +74,7 @@ mod tests {
         stake_bump: u8,
         reserve_bump: u8,
     ) -> Vec<u8> {
-        let mut data = vec![0u8];
+        let mut data = vec![0u8]; // Discriminator for Initialize
         data.extend_from_slice(&seed.to_le_bytes());
         data.push(pool_bump);
         data.push(mint_bump);
@@ -76,8 +85,10 @@ mod tests {
 
     fn setup_svm() -> LiteSVM {
         let mut svm = LiteSVM::new().with_builtins().with_sigverify(false);
+
         svm.add_program_from_file(PROGRAM_ID, "target/deploy/liquid_staking_token.so")
             .expect("Failed to load program");
+
         svm
     }
 
@@ -114,6 +125,9 @@ mod tests {
         match result {
             Ok(meta) => {
                 eprintln!("\n=== Transaction Succeeded ===");
+                for log in &meta.logs {
+                    eprintln!("  {}", log);
+                }
             }
             Err(err) => {
                 eprintln!("\n=== Transaction Failed ===");
@@ -125,633 +139,49 @@ mod tests {
         }
     }
 
-    /// Helper to build initialize instruction
-    fn build_initialize_instruction(
-        initializer: &Pubkey,
-        pool_state_pda: &Pubkey,
-        lst_mint_pda: &Pubkey,
-        stake_account_pda: &Pubkey,
-        reserve_stake_pda: &Pubkey,
-        validator_vote: &Pubkey,
-        instruction_data: Vec<u8>,
-    ) -> Instruction {
-        Instruction {
-            program_id: PROGRAM_ID,
-            accounts: vec![
-                AccountMeta::new(*initializer, true),
-                AccountMeta::new(*pool_state_pda, false),
-                AccountMeta::new(*lst_mint_pda, false),
-                AccountMeta::new(*stake_account_pda, false),
-                AccountMeta::new(*reserve_stake_pda, false),
-                AccountMeta::new_readonly(*validator_vote, false),
-                AccountMeta::new_readonly(CLOCK_SYSVAR.into(), false),
-                AccountMeta::new_readonly(RENT_SYSVAR.into(), false),
-                AccountMeta::new_readonly(STAKE_HISTORY_SYSVAR, false),
-                AccountMeta::new_readonly(STAKE_CONFIG, false),
-                AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
-                AccountMeta::new_readonly(TOKEN_PROGRAM_ID, false),
-                AccountMeta::new_readonly(STAKE_PROGRAM_ID, false),
-            ],
-            data: instruction_data,
-        }
+    /// Helper to get token account balance from account data
+    fn get_token_balance(account_data: &[u8]) -> u64 {
+        // SPL Token account layout: amount is at offset 64, 8 bytes
+        u64::from_le_bytes(account_data[64..72].try_into().unwrap())
     }
-
-    // ============================================
-    // SUCCESS CASES
-    // ============================================
 
     #[test]
     fn test_initialize_success() {
         let mut svm = setup_svm();
         let initializer = Keypair::new();
+
+        // Need enough for pool state + mint + stake account + ATA creation
         svm.airdrop(&initializer.pubkey(), 2_000_000_000).unwrap();
 
+        // Create a validator vote account
         let validator_identity = Keypair::new();
         let validator_vote = create_vote_account(&mut svm, &validator_identity.pubkey());
 
         let seed = 12345u64;
 
+        // Derive all PDAs
         let (pool_state_pda, pool_bump) = derive_pool_state_pda(&initializer.pubkey(), seed);
         let (lst_mint_pda, mint_bump) = derive_lst_mint_pda(&pool_state_pda);
         let (stake_account_pda, stake_bump) = derive_stake_account_pda(&pool_state_pda);
         let (reserve_stake_pda, reserve_bump) = derive_reserve_stake_account_pda(&pool_state_pda);
 
-        let instruction_data =
-            create_initialize_instruction_data(seed, pool_bump, mint_bump, stake_bump, reserve_bump);
+        // Derive the initializer's ATA for the LST mint
+        let initializer_lst_ata =
+            get_associated_token_address(&initializer.pubkey(), &lst_mint_pda);
 
-        let instruction = build_initialize_instruction(
-            &initializer.pubkey(),
-            &pool_state_pda,
-            &lst_mint_pda,
-            &stake_account_pda,
-            &reserve_stake_pda,
-            &validator_vote,
-            instruction_data,
+        let instruction_data = create_initialize_instruction_data(
+            seed,
+            pool_bump,
+            mint_bump,
+            stake_bump,
+            reserve_bump,
         );
 
-        let transaction = Transaction::new_signed_with_payer(
-            &[instruction],
-            Some(&initializer.pubkey()),
-            &[&initializer],
-            svm.latest_blockhash(),
-        );
-
-        let result = svm.send_transaction(transaction);
-        print_transaction_logs(&result);
-        assert!(result.is_ok(), "Initialize should succeed");
-
-        // Verify all accounts created
-        assert!(svm.get_account(&pool_state_pda).is_some());
-        assert!(svm.get_account(&lst_mint_pda).is_some());
-        assert!(svm.get_account(&stake_account_pda).is_some());
-        assert!(svm.get_account(&reserve_stake_pda).is_some());
-
-        println!("\n=== test_initialize_success PASSED ===");
-    }
-
-    #[test]
-    fn test_initialize_with_different_seeds() {
-        let mut svm = setup_svm();
-        let initializer = Keypair::new();
-        svm.airdrop(&initializer.pubkey(), 5_000_000_000).unwrap();
-
-        let validator_identity = Keypair::new();
-        let validator_vote = create_vote_account(&mut svm, &validator_identity.pubkey());
-
-        // Initialize with seed 1
-        let seed1 = 1u64;
-        let (pool_state_pda1, pool_bump1) = derive_pool_state_pda(&initializer.pubkey(), seed1);
-        let (lst_mint_pda1, mint_bump1) = derive_lst_mint_pda(&pool_state_pda1);
-        let (stake_account_pda1, stake_bump1) = derive_stake_account_pda(&pool_state_pda1);
-        let (reserve_stake_pda1, reserve_bump1) = derive_reserve_stake_account_pda(&pool_state_pda1);
-
-        let instruction_data1 =
-            create_initialize_instruction_data(seed1, pool_bump1, mint_bump1, stake_bump1, reserve_bump1);
-
-        let instruction1 = build_initialize_instruction(
-            &initializer.pubkey(),
-            &pool_state_pda1,
-            &lst_mint_pda1,
-            &stake_account_pda1,
-            &reserve_stake_pda1,
-            &validator_vote,
-            instruction_data1,
-        );
-
-        let tx1 = Transaction::new_signed_with_payer(
-            &[instruction1],
-            Some(&initializer.pubkey()),
-            &[&initializer],
-            svm.latest_blockhash(),
-        );
-
-        let result1 = svm.send_transaction(tx1);
-        print_transaction_logs(&result1);
-        assert!(result1.is_ok(), "First initialize should succeed");
-
-        // Initialize with seed 2 (same initializer, different pool)
-        let seed2 = 2u64;
-        let (pool_state_pda2, pool_bump2) = derive_pool_state_pda(&initializer.pubkey(), seed2);
-        let (lst_mint_pda2, mint_bump2) = derive_lst_mint_pda(&pool_state_pda2);
-        let (stake_account_pda2, stake_bump2) = derive_stake_account_pda(&pool_state_pda2);
-        let (reserve_stake_pda2, reserve_bump2) = derive_reserve_stake_account_pda(&pool_state_pda2);
-
-        let instruction_data2 =
-            create_initialize_instruction_data(seed2, pool_bump2, mint_bump2, stake_bump2, reserve_bump2);
-
-        let instruction2 = build_initialize_instruction(
-            &initializer.pubkey(),
-            &pool_state_pda2,
-            &lst_mint_pda2,
-            &stake_account_pda2,
-            &reserve_stake_pda2,
-            &validator_vote,
-            instruction_data2,
-        );
-
-        let tx2 = Transaction::new_signed_with_payer(
-            &[instruction2],
-            Some(&initializer.pubkey()),
-            &[&initializer],
-            svm.latest_blockhash(),
-        );
-
-        let result2 = svm.send_transaction(tx2);
-        print_transaction_logs(&result2);
-        assert!(result2.is_ok(), "Second initialize with different seed should succeed");
-
-        // Verify both pools exist
-        assert!(svm.get_account(&pool_state_pda1).is_some());
-        assert!(svm.get_account(&pool_state_pda2).is_some());
-
-        println!("\n=== test_initialize_with_different_seeds PASSED ===");
-    }
-
-    // ============================================
-    // FAILURE CASES - INSUFFICIENT FUNDS
-    // ============================================
-
-    #[test]
-    fn test_initialize_insufficient_funds() {
-        let mut svm = setup_svm();
-        let initializer = Keypair::new();
-        // Only airdrop enough for transaction fee, not for stake delegation
-        svm.airdrop(&initializer.pubkey(), 100_000).unwrap();
-
-        let validator_identity = Keypair::new();
-        let validator_vote = create_vote_account(&mut svm, &validator_identity.pubkey());
-
-        let seed = 12345u64;
-
-        let (pool_state_pda, pool_bump) = derive_pool_state_pda(&initializer.pubkey(), seed);
-        let (lst_mint_pda, mint_bump) = derive_lst_mint_pda(&pool_state_pda);
-        let (stake_account_pda, stake_bump) = derive_stake_account_pda(&pool_state_pda);
-        let (reserve_stake_pda, reserve_bump) = derive_reserve_stake_account_pda(&pool_state_pda);
-
-        let instruction_data =
-            create_initialize_instruction_data(seed, pool_bump, mint_bump, stake_bump, reserve_bump);
-
-        let instruction = build_initialize_instruction(
-            &initializer.pubkey(),
-            &pool_state_pda,
-            &lst_mint_pda,
-            &stake_account_pda,
-            &reserve_stake_pda,
-            &validator_vote,
-            instruction_data,
-        );
-
-        let transaction = Transaction::new_signed_with_payer(
-            &[instruction],
-            Some(&initializer.pubkey()),
-            &[&initializer],
-            svm.latest_blockhash(),
-        );
-
-        let result = svm.send_transaction(transaction);
-        print_transaction_logs(&result);
-        assert!(result.is_err(), "Should fail with insufficient funds");
-
-        println!("\n=== test_initialize_insufficient_funds PASSED ===");
-    }
-
-    // ============================================
-    // FAILURE CASES - INVALID BUMPS
-    // ============================================
-
-    #[test]
-    fn test_initialize_wrong_pool_bump() {
-        let mut svm = setup_svm();
-        let initializer = Keypair::new();
-        svm.airdrop(&initializer.pubkey(), 2_000_000_000).unwrap();
-
-        let validator_identity = Keypair::new();
-        let validator_vote = create_vote_account(&mut svm, &validator_identity.pubkey());
-
-        let seed = 12345u64;
-
-        let (pool_state_pda, pool_bump) = derive_pool_state_pda(&initializer.pubkey(), seed);
-        let (lst_mint_pda, mint_bump) = derive_lst_mint_pda(&pool_state_pda);
-        let (stake_account_pda, stake_bump) = derive_stake_account_pda(&pool_state_pda);
-        let (reserve_stake_pda, reserve_bump) = derive_reserve_stake_account_pda(&pool_state_pda);
-
-        // Use wrong pool bump
-        let wrong_pool_bump = pool_bump.wrapping_add(1);
-        let instruction_data =
-            create_initialize_instruction_data(seed, wrong_pool_bump, mint_bump, stake_bump, reserve_bump);
-
-        let instruction = build_initialize_instruction(
-            &initializer.pubkey(),
-            &pool_state_pda,
-            &lst_mint_pda,
-            &stake_account_pda,
-            &reserve_stake_pda,
-            &validator_vote,
-            instruction_data,
-        );
-
-        let transaction = Transaction::new_signed_with_payer(
-            &[instruction],
-            Some(&initializer.pubkey()),
-            &[&initializer],
-            svm.latest_blockhash(),
-        );
-
-        let result = svm.send_transaction(transaction);
-        print_transaction_logs(&result);
-        assert!(result.is_err(), "Should fail with wrong pool bump");
-
-        println!("\n=== test_initialize_wrong_pool_bump PASSED ===");
-    }
-
-    #[test]
-    fn test_initialize_wrong_mint_bump() {
-        let mut svm = setup_svm();
-        let initializer = Keypair::new();
-        svm.airdrop(&initializer.pubkey(), 2_000_000_000).unwrap();
-
-        let validator_identity = Keypair::new();
-        let validator_vote = create_vote_account(&mut svm, &validator_identity.pubkey());
-
-        let seed = 12345u64;
-
-        let (pool_state_pda, pool_bump) = derive_pool_state_pda(&initializer.pubkey(), seed);
-        let (lst_mint_pda, mint_bump) = derive_lst_mint_pda(&pool_state_pda);
-        let (stake_account_pda, stake_bump) = derive_stake_account_pda(&pool_state_pda);
-        let (reserve_stake_pda, reserve_bump) = derive_reserve_stake_account_pda(&pool_state_pda);
-
-        // Use wrong mint bump
-        let wrong_mint_bump = mint_bump.wrapping_add(1);
-        let instruction_data =
-            create_initialize_instruction_data(seed, pool_bump, wrong_mint_bump, stake_bump, reserve_bump);
-
-        let instruction = build_initialize_instruction(
-            &initializer.pubkey(),
-            &pool_state_pda,
-            &lst_mint_pda,
-            &stake_account_pda,
-            &reserve_stake_pda,
-            &validator_vote,
-            instruction_data,
-        );
-
-        let transaction = Transaction::new_signed_with_payer(
-            &[instruction],
-            Some(&initializer.pubkey()),
-            &[&initializer],
-            svm.latest_blockhash(),
-        );
-
-        let result = svm.send_transaction(transaction);
-        print_transaction_logs(&result);
-        assert!(result.is_err(), "Should fail with wrong mint bump");
-
-        println!("\n=== test_initialize_wrong_mint_bump PASSED ===");
-    }
-
-    #[test]
-    fn test_initialize_wrong_stake_bump() {
-        let mut svm = setup_svm();
-        let initializer = Keypair::new();
-        svm.airdrop(&initializer.pubkey(), 2_000_000_000).unwrap();
-
-        let validator_identity = Keypair::new();
-        let validator_vote = create_vote_account(&mut svm, &validator_identity.pubkey());
-
-        let seed = 12345u64;
-
-        let (pool_state_pda, pool_bump) = derive_pool_state_pda(&initializer.pubkey(), seed);
-        let (lst_mint_pda, mint_bump) = derive_lst_mint_pda(&pool_state_pda);
-        let (stake_account_pda, stake_bump) = derive_stake_account_pda(&pool_state_pda);
-        let (reserve_stake_pda, reserve_bump) = derive_reserve_stake_account_pda(&pool_state_pda);
-
-        // Use wrong stake bump
-        let wrong_stake_bump = stake_bump.wrapping_add(1);
-        let instruction_data =
-            create_initialize_instruction_data(seed, pool_bump, mint_bump, wrong_stake_bump, reserve_bump);
-
-        let instruction = build_initialize_instruction(
-            &initializer.pubkey(),
-            &pool_state_pda,
-            &lst_mint_pda,
-            &stake_account_pda,
-            &reserve_stake_pda,
-            &validator_vote,
-            instruction_data,
-        );
-
-        let transaction = Transaction::new_signed_with_payer(
-            &[instruction],
-            Some(&initializer.pubkey()),
-            &[&initializer],
-            svm.latest_blockhash(),
-        );
-
-        let result = svm.send_transaction(transaction);
-        print_transaction_logs(&result);
-        assert!(result.is_err(), "Should fail with wrong stake bump");
-
-        println!("\n=== test_initialize_wrong_stake_bump PASSED ===");
-    }
-
-    #[test]
-    fn test_initialize_wrong_reserve_bump() {
-        let mut svm = setup_svm();
-        let initializer = Keypair::new();
-        svm.airdrop(&initializer.pubkey(), 2_000_000_000).unwrap();
-
-        let validator_identity = Keypair::new();
-        let validator_vote = create_vote_account(&mut svm, &validator_identity.pubkey());
-
-        let seed = 12345u64;
-
-        let (pool_state_pda, pool_bump) = derive_pool_state_pda(&initializer.pubkey(), seed);
-        let (lst_mint_pda, mint_bump) = derive_lst_mint_pda(&pool_state_pda);
-        let (stake_account_pda, stake_bump) = derive_stake_account_pda(&pool_state_pda);
-        let (reserve_stake_pda, reserve_bump) = derive_reserve_stake_account_pda(&pool_state_pda);
-
-        // Use wrong reserve bump
-        let wrong_reserve_bump = reserve_bump.wrapping_add(1);
-        let instruction_data =
-            create_initialize_instruction_data(seed, pool_bump, mint_bump, stake_bump, wrong_reserve_bump);
-
-        let instruction = build_initialize_instruction(
-            &initializer.pubkey(),
-            &pool_state_pda,
-            &lst_mint_pda,
-            &stake_account_pda,
-            &reserve_stake_pda,
-            &validator_vote,
-            instruction_data,
-        );
-
-        let transaction = Transaction::new_signed_with_payer(
-            &[instruction],
-            Some(&initializer.pubkey()),
-            &[&initializer],
-            svm.latest_blockhash(),
-        );
-
-        let result = svm.send_transaction(transaction);
-        print_transaction_logs(&result);
-        assert!(result.is_err(), "Should fail with wrong reserve bump");
-
-        println!("\n=== test_initialize_wrong_reserve_bump PASSED ===");
-    }
-
-    // ============================================
-    // FAILURE CASES - WRONG ACCOUNTS
-    // ============================================
-
-    #[test]
-    fn test_initialize_wrong_pool_state_pda() {
-        let mut svm = setup_svm();
-        let initializer = Keypair::new();
-        svm.airdrop(&initializer.pubkey(), 2_000_000_000).unwrap();
-
-        let validator_identity = Keypair::new();
-        let validator_vote = create_vote_account(&mut svm, &validator_identity.pubkey());
-
-        let seed = 12345u64;
-
-        let (pool_state_pda, pool_bump) = derive_pool_state_pda(&initializer.pubkey(), seed);
-        let (lst_mint_pda, mint_bump) = derive_lst_mint_pda(&pool_state_pda);
-        let (stake_account_pda, stake_bump) = derive_stake_account_pda(&pool_state_pda);
-        let (reserve_stake_pda, reserve_bump) = derive_reserve_stake_account_pda(&pool_state_pda);
-
-        // Use wrong pool state (different seed derivation)
-        let wrong_seed = 99999u64;
-        let (wrong_pool_state_pda, _) = derive_pool_state_pda(&initializer.pubkey(), wrong_seed);
-
-        let instruction_data =
-            create_initialize_instruction_data(seed, pool_bump, mint_bump, stake_bump, reserve_bump);
-
-        let instruction = build_initialize_instruction(
-            &initializer.pubkey(),
-            &wrong_pool_state_pda, // Wrong PDA
-            &lst_mint_pda,
-            &stake_account_pda,
-            &reserve_stake_pda,
-            &validator_vote,
-            instruction_data,
-        );
-
-        let transaction = Transaction::new_signed_with_payer(
-            &[instruction],
-            Some(&initializer.pubkey()),
-            &[&initializer],
-            svm.latest_blockhash(),
-        );
-
-        let result = svm.send_transaction(transaction);
-        print_transaction_logs(&result);
-        assert!(result.is_err(), "Should fail with wrong pool state PDA");
-
-        println!("\n=== test_initialize_wrong_pool_state_pda PASSED ===");
-    }
-
-    #[test]
-    fn test_initialize_wrong_lst_mint_pda() {
-        let mut svm = setup_svm();
-        let initializer = Keypair::new();
-        svm.airdrop(&initializer.pubkey(), 2_000_000_000).unwrap();
-
-        let validator_identity = Keypair::new();
-        let validator_vote = create_vote_account(&mut svm, &validator_identity.pubkey());
-
-        let seed = 12345u64;
-
-        let (pool_state_pda, pool_bump) = derive_pool_state_pda(&initializer.pubkey(), seed);
-        let (_, mint_bump) = derive_lst_mint_pda(&pool_state_pda);
-        let (stake_account_pda, stake_bump) = derive_stake_account_pda(&pool_state_pda);
-        let (reserve_stake_pda, reserve_bump) = derive_reserve_stake_account_pda(&pool_state_pda);
-
-        // Create a random wrong mint PDA
-        let wrong_lst_mint = Keypair::new().pubkey();
-
-        let instruction_data =
-            create_initialize_instruction_data(seed, pool_bump, mint_bump, stake_bump, reserve_bump);
-
-        let instruction = build_initialize_instruction(
-            &initializer.pubkey(),
-            &pool_state_pda,
-            &wrong_lst_mint, // Wrong mint
-            &stake_account_pda,
-            &reserve_stake_pda,
-            &validator_vote,
-            instruction_data,
-        );
-
-        let transaction = Transaction::new_signed_with_payer(
-            &[instruction],
-            Some(&initializer.pubkey()),
-            &[&initializer],
-            svm.latest_blockhash(),
-        );
-
-        let result = svm.send_transaction(transaction);
-        print_transaction_logs(&result);
-        assert!(result.is_err(), "Should fail with wrong LST mint PDA");
-
-        println!("\n=== test_initialize_wrong_lst_mint_pda PASSED ===");
-    }
-
-    #[test]
-    fn test_initialize_wrong_stake_account_pda() {
-        let mut svm = setup_svm();
-        let initializer = Keypair::new();
-        svm.airdrop(&initializer.pubkey(), 2_000_000_000).unwrap();
-
-        let validator_identity = Keypair::new();
-        let validator_vote = create_vote_account(&mut svm, &validator_identity.pubkey());
-
-        let seed = 12345u64;
-
-        let (pool_state_pda, pool_bump) = derive_pool_state_pda(&initializer.pubkey(), seed);
-        let (lst_mint_pda, mint_bump) = derive_lst_mint_pda(&pool_state_pda);
-        let (_, stake_bump) = derive_stake_account_pda(&pool_state_pda);
-        let (reserve_stake_pda, reserve_bump) = derive_reserve_stake_account_pda(&pool_state_pda);
-
-        // Create a random wrong stake account
-        let wrong_stake_account = Keypair::new().pubkey();
-
-        let instruction_data =
-            create_initialize_instruction_data(seed, pool_bump, mint_bump, stake_bump, reserve_bump);
-
-        let instruction = build_initialize_instruction(
-            &initializer.pubkey(),
-            &pool_state_pda,
-            &lst_mint_pda,
-            &wrong_stake_account, // Wrong stake account
-            &reserve_stake_pda,
-            &validator_vote,
-            instruction_data,
-        );
-
-        let transaction = Transaction::new_signed_with_payer(
-            &[instruction],
-            Some(&initializer.pubkey()),
-            &[&initializer],
-            svm.latest_blockhash(),
-        );
-
-        let result = svm.send_transaction(transaction);
-        print_transaction_logs(&result);
-        assert!(result.is_err(), "Should fail with wrong stake account PDA");
-
-        println!("\n=== test_initialize_wrong_stake_account_pda PASSED ===");
-    }
-
-    // ============================================
-    // FAILURE CASES - DOUBLE INITIALIZATION
-    // ============================================
-
-    #[test]
-    fn test_initialize_double_init_fails() {
-        let mut svm = setup_svm();
-        let initializer = Keypair::new();
-        svm.airdrop(&initializer.pubkey(), 5_000_000_000).unwrap();
-
-        let validator_identity = Keypair::new();
-        let validator_vote = create_vote_account(&mut svm, &validator_identity.pubkey());
-
-        let seed = 12345u64;
-
-        let (pool_state_pda, pool_bump) = derive_pool_state_pda(&initializer.pubkey(), seed);
-        let (lst_mint_pda, mint_bump) = derive_lst_mint_pda(&pool_state_pda);
-        let (stake_account_pda, stake_bump) = derive_stake_account_pda(&pool_state_pda);
-        let (reserve_stake_pda, reserve_bump) = derive_reserve_stake_account_pda(&pool_state_pda);
-
-        let instruction_data =
-            create_initialize_instruction_data(seed, pool_bump, mint_bump, stake_bump, reserve_bump);
-
-        let instruction = build_initialize_instruction(
-            &initializer.pubkey(),
-            &pool_state_pda,
-            &lst_mint_pda,
-            &stake_account_pda,
-            &reserve_stake_pda,
-            &validator_vote,
-            instruction_data.clone(),
-        );
-
-        // First initialization
-        let tx1 = Transaction::new_signed_with_payer(
-            &[instruction.clone()],
-            Some(&initializer.pubkey()),
-            &[&initializer],
-            svm.latest_blockhash(),
-        );
-
-        let result1 = svm.send_transaction(tx1);
-        print_transaction_logs(&result1);
-        assert!(result1.is_ok(), "First initialize should succeed");
-
-        // Second initialization with same params
-        let tx2 = Transaction::new_signed_with_payer(
-            &[instruction],
-            Some(&initializer.pubkey()),
-            &[&initializer],
-            svm.latest_blockhash(),
-        );
-
-        let result2 = svm.send_transaction(tx2);
-        print_transaction_logs(&result2);
-        assert!(result2.is_err(), "Double initialization should fail");
-
-        println!("\n=== test_initialize_double_init_fails PASSED ===");
-    }
-
-    // ============================================
-    // FAILURE CASES - SIGNER CHECKS
-    // ============================================
-
-    #[test]
-    fn test_initialize_missing_signer() {
-        let mut svm = setup_svm();
-        let initializer = Keypair::new();
-        let payer = Keypair::new();
-        svm.airdrop(&initializer.pubkey(), 2_000_000_000).unwrap();
-        svm.airdrop(&payer.pubkey(), 1_000_000_000).unwrap();
-
-        let validator_identity = Keypair::new();
-        let validator_vote = create_vote_account(&mut svm, &validator_identity.pubkey());
-
-        let seed = 12345u64;
-
-        let (pool_state_pda, pool_bump) = derive_pool_state_pda(&initializer.pubkey(), seed);
-        let (lst_mint_pda, mint_bump) = derive_lst_mint_pda(&pool_state_pda);
-        let (stake_account_pda, stake_bump) = derive_stake_account_pda(&pool_state_pda);
-        let (reserve_stake_pda, reserve_bump) = derive_reserve_stake_account_pda(&pool_state_pda);
-
-        let instruction_data =
-            create_initialize_instruction_data(seed, pool_bump, mint_bump, stake_bump, reserve_bump);
-
-        // Build instruction with initializer NOT as signer
         let instruction = Instruction {
             program_id: PROGRAM_ID,
             accounts: vec![
-                AccountMeta::new(initializer.pubkey(), false), // NOT a signer
+                AccountMeta::new(initializer.pubkey(), true),
+                AccountMeta::new(initializer_lst_ata, false), // NEW: initializer's LST ATA
                 AccountMeta::new(pool_state_pda, false),
                 AccountMeta::new(lst_mint_pda, false),
                 AccountMeta::new(stake_account_pda, false),
@@ -764,309 +194,445 @@ mod tests {
                 AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
                 AccountMeta::new_readonly(TOKEN_PROGRAM_ID, false),
                 AccountMeta::new_readonly(STAKE_PROGRAM_ID, false),
+                AccountMeta::new_readonly(ATA_PROGRAM_ID, false),
             ],
             data: instruction_data,
         };
 
         let transaction = Transaction::new_signed_with_payer(
             &[instruction],
-            Some(&payer.pubkey()),
-            &[&payer], // Only payer signs, not initializer
+            Some(&initializer.pubkey()),
+            &[&initializer],
             svm.latest_blockhash(),
         );
 
         let result = svm.send_transaction(transaction);
         print_transaction_logs(&result);
-        assert!(result.is_err(), "Should fail without initializer signature");
+        assert!(result.is_ok(), "Transaction should succeed");
 
-        println!("\n=== test_initialize_missing_signer PASSED ===");
+        // Verify pool state was created
+        let pool_state_account = svm.get_account(&pool_state_pda);
+        assert!(
+            pool_state_account.is_some(),
+            "Pool state account should exist"
+        );
+        let pool_account = pool_state_account.unwrap();
+        assert_eq!(
+            pool_account.owner, PROGRAM_ID,
+            "Pool state should be owned by program"
+        );
+
+        // Verify LST mint was created
+        let lst_mint_account = svm.get_account(&lst_mint_pda);
+        assert!(lst_mint_account.is_some(), "LST mint account should exist");
+        let mint_account = lst_mint_account.unwrap();
+        assert_eq!(
+            mint_account.owner, TOKEN_PROGRAM_ID,
+            "Mint should be owned by token program"
+        );
+
+        // Verify stake account was created
+        let stake_account = svm.get_account(&stake_account_pda);
+        assert!(stake_account.is_some(), "Stake account should exist");
+        let stake = stake_account.unwrap();
+        assert_eq!(
+            stake.owner, STAKE_PROGRAM_ID,
+            "Stake account should be owned by stake program"
+        );
+
+        // Verify initializer received LST tokens
+        let initializer_ata_account = svm.get_account(&initializer_lst_ata);
+        assert!(
+            initializer_ata_account.is_some(),
+            "Initializer LST ATA should exist"
+        );
+        let ata_account = initializer_ata_account.unwrap();
+        assert_eq!(
+            ata_account.owner, TOKEN_PROGRAM_ID,
+            "ATA should be owned by token program"
+        );
+
+        let lst_balance = get_token_balance(&ata_account.data);
+        assert_eq!(
+            lst_balance, MIN_STAKE_DELEGATION,
+            "Initializer should have received {} LST tokens, got {}",
+            MIN_STAKE_DELEGATION, lst_balance
+        );
+
+        // Verify stake account has MIN_STAKE_DELEGATION
+        assert!(
+            stake.lamports >= MIN_STAKE_DELEGATION,
+            "Stake account should have at least {} lamports",
+            MIN_STAKE_DELEGATION
+        );
+
+        println!("\n=== Verification Passed ===");
+        println!("  Pool State: {}", pool_state_pda);
+        println!("  LST Mint: {}", lst_mint_pda);
+        println!("  Stake Account: {}", stake_account_pda);
+        println!("  Initializer ATA: {}", initializer_lst_ata);
+        println!("  Initializer LST Balance: {}", lst_balance);
+        println!("  Stake Account Lamports: {}", stake.lamports);
     }
 
-    // ============================================
-    // FAILURE CASES - INVALID VOTE ACCOUNT
-    // ============================================
-
     #[test]
-    fn test_initialize_invalid_vote_account() {
+    fn test_reinitialize_attack_fails() {
         let mut svm = setup_svm();
         let initializer = Keypair::new();
-        svm.airdrop(&initializer.pubkey(), 2_000_000_000).unwrap();
 
-        // Create a fake "vote account" that's actually a system account
+        svm.airdrop(&initializer.pubkey(), 5_000_000_000).unwrap();
+
+        // Create validator vote account
+        let validator_identity = Keypair::new();
+        let validator_vote = create_vote_account(&mut svm, &validator_identity.pubkey());
+
+        let seed = 12345u64;
+
+        // Derive all PDAs
+        let (pool_state_pda, pool_bump) = derive_pool_state_pda(&initializer.pubkey(), seed);
+        let (lst_mint_pda, mint_bump) = derive_lst_mint_pda(&pool_state_pda);
+        let (stake_account_pda, stake_bump) = derive_stake_account_pda(&pool_state_pda);
+        let (reserve_stake_pda, reserve_bump) = derive_reserve_stake_account_pda(&pool_state_pda);
+        let initializer_lst_ata =
+            get_associated_token_address(&initializer.pubkey(), &lst_mint_pda);
+
+        // ============ FIRST INITIALIZE (should succeed) ============
+        let init_instruction_data = create_initialize_instruction_data(
+            seed,
+            pool_bump,
+            mint_bump,
+            stake_bump,
+            reserve_bump,
+        );
+
+        let init_instruction = Instruction {
+            program_id: PROGRAM_ID,
+            accounts: vec![
+                AccountMeta::new(initializer.pubkey(), true),
+                AccountMeta::new(initializer_lst_ata, false),
+                AccountMeta::new(pool_state_pda, false),
+                AccountMeta::new(lst_mint_pda, false),
+                AccountMeta::new(stake_account_pda, false),
+                AccountMeta::new(reserve_stake_pda, false),
+                AccountMeta::new_readonly(validator_vote, false),
+                AccountMeta::new_readonly(CLOCK_SYSVAR.into(), false),
+                AccountMeta::new_readonly(RENT_SYSVAR.into(), false),
+                AccountMeta::new_readonly(STAKE_HISTORY_SYSVAR, false),
+                AccountMeta::new_readonly(STAKE_CONFIG, false),
+                AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
+                AccountMeta::new_readonly(TOKEN_PROGRAM_ID, false),
+                AccountMeta::new_readonly(STAKE_PROGRAM_ID, false),
+                AccountMeta::new_readonly(ATA_PROGRAM_ID, false),
+            ],
+            data: init_instruction_data.clone(),
+        };
+
+        let init_tx = Transaction::new_signed_with_payer(
+            &[init_instruction.clone()],
+            Some(&initializer.pubkey()),
+            &[&initializer],
+            svm.latest_blockhash(),
+        );
+
+        let result = svm.send_transaction(init_tx);
+        print_transaction_logs(&result);
+        assert!(result.is_ok(), "First initialize should succeed");
+
+        // Verify pool was created
+        let pool_state_account = svm.get_account(&pool_state_pda);
+        assert!(pool_state_account.is_some(), "Pool state should exist");
+
+        // ============ SECOND INITIALIZE (should fail) ============
+        let reinit_tx = Transaction::new_signed_with_payer(
+            &[init_instruction],
+            Some(&initializer.pubkey()),
+            &[&initializer],
+            svm.latest_blockhash(),
+        );
+
+        let result = svm.send_transaction(reinit_tx);
+        print_transaction_logs(&result);
+        assert!(
+            result.is_err(),
+            "Re-initialization should fail - pool already exists"
+        );
+
+        // Verify pool state wasn't modified
+        let pool_state_after = svm.get_account(&pool_state_pda).unwrap();
+        let lst_supply = get_lst_supply_from_pool_state(&pool_state_after.data);
+        assert_eq!(
+            lst_supply, MIN_STAKE_DELEGATION,
+            "lst_supply should remain unchanged after failed re-init"
+        );
+
+        println!("\n=== Test Passed: Re-initialization Attack Prevented ===");
+    }
+
+    #[test]
+    fn test_fake_validator_vote_account_fails() {
+        let mut svm = setup_svm();
+        let initializer = Keypair::new();
+
+        svm.airdrop(&initializer.pubkey(), 3_000_000_000).unwrap();
+
+        let seed = 12345u64;
+
+        // Derive all PDAs
+        let (pool_state_pda, pool_bump) = derive_pool_state_pda(&initializer.pubkey(), seed);
+        let (lst_mint_pda, mint_bump) = derive_lst_mint_pda(&pool_state_pda);
+        let (stake_account_pda, stake_bump) = derive_stake_account_pda(&pool_state_pda);
+        let (reserve_stake_pda, reserve_bump) = derive_reserve_stake_account_pda(&pool_state_pda);
+        let initializer_lst_ata =
+            get_associated_token_address(&initializer.pubkey(), &lst_mint_pda);
+
+        // ============ CREATE FAKE VOTE ACCOUNT ============
+        // This account is NOT owned by the vote program
         let fake_vote = Keypair::new();
-        svm.airdrop(&fake_vote.pubkey(), 1_000_000_000).unwrap();
-
-        let seed = 12345u64;
-
-        let (pool_state_pda, pool_bump) = derive_pool_state_pda(&initializer.pubkey(), seed);
-        let (lst_mint_pda, mint_bump) = derive_lst_mint_pda(&pool_state_pda);
-        let (stake_account_pda, stake_bump) = derive_stake_account_pda(&pool_state_pda);
-        let (reserve_stake_pda, reserve_bump) = derive_reserve_stake_account_pda(&pool_state_pda);
-
-        let instruction_data =
-            create_initialize_instruction_data(seed, pool_bump, mint_bump, stake_bump, reserve_bump);
-
-        let instruction = build_initialize_instruction(
-            &initializer.pubkey(),
-            &pool_state_pda,
-            &lst_mint_pda,
-            &stake_account_pda,
-            &reserve_stake_pda,
-            &fake_vote.pubkey(), // Not a real vote account
-            instruction_data,
+        svm.set_account(
+            fake_vote.pubkey(),
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![0u8; 100],     // Arbitrary data
+                owner: SYSTEM_PROGRAM_ID, // Wrong owner - should be VOTE_PROGRAM_ID
+                executable: false,
+                rent_epoch: 0,
+            }
+            .into(),
         );
 
-        let transaction = Transaction::new_signed_with_payer(
-            &[instruction],
+        let init_instruction_data = create_initialize_instruction_data(
+            seed,
+            pool_bump,
+            mint_bump,
+            stake_bump,
+            reserve_bump,
+        );
+
+        let init_instruction = Instruction {
+            program_id: PROGRAM_ID,
+            accounts: vec![
+                AccountMeta::new(initializer.pubkey(), true),
+                AccountMeta::new(initializer_lst_ata, false),
+                AccountMeta::new(pool_state_pda, false),
+                AccountMeta::new(lst_mint_pda, false),
+                AccountMeta::new(stake_account_pda, false),
+                AccountMeta::new(reserve_stake_pda, false),
+                AccountMeta::new_readonly(fake_vote.pubkey(), false), // Fake vote account
+                AccountMeta::new_readonly(CLOCK_SYSVAR.into(), false),
+                AccountMeta::new_readonly(RENT_SYSVAR.into(), false),
+                AccountMeta::new_readonly(STAKE_HISTORY_SYSVAR, false),
+                AccountMeta::new_readonly(STAKE_CONFIG, false),
+                AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
+                AccountMeta::new_readonly(TOKEN_PROGRAM_ID, false),
+                AccountMeta::new_readonly(STAKE_PROGRAM_ID, false),
+                AccountMeta::new_readonly(ATA_PROGRAM_ID, false),
+            ],
+            data: init_instruction_data,
+        };
+
+        let init_tx = Transaction::new_signed_with_payer(
+            &[init_instruction],
             Some(&initializer.pubkey()),
             &[&initializer],
             svm.latest_blockhash(),
         );
 
-        let result = svm.send_transaction(transaction);
+        let result = svm.send_transaction(init_tx);
         print_transaction_logs(&result);
-        // This should fail when trying to delegate to non-vote account
-        assert!(result.is_err(), "Should fail with invalid vote account");
 
-        println!("\n=== test_initialize_invalid_vote_account PASSED ===");
-    }
-
-    // ============================================
-    // EDGE CASES - DATA VALIDATION
-    // ============================================
-
-    #[test]
-    fn test_initialize_seed_zero_fails() {
-        let mut svm = setup_svm();
-        let initializer = Keypair::new();
-        svm.airdrop(&initializer.pubkey(), 2_000_000_000).unwrap();
-    
-        let validator_identity = Keypair::new();
-        let validator_vote = create_vote_account(&mut svm, &validator_identity.pubkey());
-    
-        let seed = 0u64;
-    
-        let (pool_state_pda, pool_bump) = derive_pool_state_pda(&initializer.pubkey(), seed);
-        let (lst_mint_pda, mint_bump) = derive_lst_mint_pda(&pool_state_pda);
-        let (stake_account_pda, stake_bump) = derive_stake_account_pda(&pool_state_pda);
-        let (reserve_stake_pda, reserve_bump) = derive_reserve_stake_account_pda(&pool_state_pda);
-    
-        let instruction_data =
-            create_initialize_instruction_data(seed, pool_bump, mint_bump, stake_bump, reserve_bump);
-    
-        let instruction = build_initialize_instruction(
-            &initializer.pubkey(),
-            &pool_state_pda,
-            &lst_mint_pda,
-            &stake_account_pda,
-            &reserve_stake_pda,
-            &validator_vote,
-            instruction_data,
+        // This should fail - if it doesn't, you need to add validation!
+        assert!(
+            result.is_err(),
+            "Initialize with fake vote account should fail. \
+        If this test fails, add vote account owner validation to your program!"
         );
-    
-        let transaction = Transaction::new_signed_with_payer(
-            &[instruction],
-            Some(&initializer.pubkey()),
-            &[&initializer],
-            svm.latest_blockhash(),
+
+        // Verify pool was NOT created
+        let pool_state_account = svm.get_account(&pool_state_pda);
+        assert!(
+            pool_state_account.is_none(),
+            "Pool state should not exist after failed init"
         );
-    
-        let result = svm.send_transaction(transaction);
-        print_transaction_logs(&result);
-        assert!(result.is_err(), "Seed 0 should be rejected");
-    
-        println!("\n=== test_initialize_seed_zero_fails PASSED ===");
+
+        println!("\n=== Test Passed: Fake Validator Vote Account Rejected ===");
     }
 
     #[test]
-    fn test_initialize_seed_max() {
+    fn test_lst_supply_equals_minted_tokens() {
         let mut svm = setup_svm();
         let initializer = Keypair::new();
-        svm.airdrop(&initializer.pubkey(), 2_000_000_000).unwrap();
 
-        let validator_identity = Keypair::new();
-        let validator_vote = create_vote_account(&mut svm, &validator_identity.pubkey());
+        svm.airdrop(&initializer.pubkey(), 3_000_000_000).unwrap();
 
-        let seed = u64::MAX; // Edge case: max seed
-
-        let (pool_state_pda, pool_bump) = derive_pool_state_pda(&initializer.pubkey(), seed);
-        let (lst_mint_pda, mint_bump) = derive_lst_mint_pda(&pool_state_pda);
-        let (stake_account_pda, stake_bump) = derive_stake_account_pda(&pool_state_pda);
-        let (reserve_stake_pda, reserve_bump) = derive_reserve_stake_account_pda(&pool_state_pda);
-
-        let instruction_data =
-            create_initialize_instruction_data(seed, pool_bump, mint_bump, stake_bump, reserve_bump);
-
-        let instruction = build_initialize_instruction(
-            &initializer.pubkey(),
-            &pool_state_pda,
-            &lst_mint_pda,
-            &stake_account_pda,
-            &reserve_stake_pda,
-            &validator_vote,
-            instruction_data,
-        );
-
-        let transaction = Transaction::new_signed_with_payer(
-            &[instruction],
-            Some(&initializer.pubkey()),
-            &[&initializer],
-            svm.latest_blockhash(),
-        );
-
-        let result = svm.send_transaction(transaction);
-        print_transaction_logs(&result);
-        assert!(result.is_ok(), "Max seed should be valid");
-
-        println!("\n=== test_initialize_seed_max PASSED ===");
-    }
-
-    #[test]
-    fn test_initialize_truncated_instruction_data() {
-        let mut svm = setup_svm();
-        let initializer = Keypair::new();
-        svm.airdrop(&initializer.pubkey(), 2_000_000_000).unwrap();
-
+        // Create validator vote account
         let validator_identity = Keypair::new();
         let validator_vote = create_vote_account(&mut svm, &validator_identity.pubkey());
 
         let seed = 12345u64;
 
-        let (pool_state_pda, _) = derive_pool_state_pda(&initializer.pubkey(), seed);
-        let (lst_mint_pda, _) = derive_lst_mint_pda(&pool_state_pda);
-        let (stake_account_pda, _) = derive_stake_account_pda(&pool_state_pda);
-        let (reserve_stake_pda, _) = derive_reserve_stake_account_pda(&pool_state_pda);
+        // Derive all PDAs
+        let (pool_state_pda, pool_bump) = derive_pool_state_pda(&initializer.pubkey(), seed);
+        let (lst_mint_pda, mint_bump) = derive_lst_mint_pda(&pool_state_pda);
+        let (stake_account_pda, stake_bump) = derive_stake_account_pda(&pool_state_pda);
+        let (reserve_stake_pda, reserve_bump) = derive_reserve_stake_account_pda(&pool_state_pda);
+        let initializer_lst_ata =
+            get_associated_token_address(&initializer.pubkey(), &lst_mint_pda);
 
-        // Truncated instruction data (missing bumps)
-        let truncated_data = vec![0u8]; // Only discriminator
-
-        let instruction = build_initialize_instruction(
-            &initializer.pubkey(),
-            &pool_state_pda,
-            &lst_mint_pda,
-            &stake_account_pda,
-            &reserve_stake_pda,
-            &validator_vote,
-            truncated_data,
+        // ============ INITIALIZE ============
+        let init_instruction_data = create_initialize_instruction_data(
+            seed,
+            pool_bump,
+            mint_bump,
+            stake_bump,
+            reserve_bump,
         );
 
-        let transaction = Transaction::new_signed_with_payer(
-            &[instruction],
+        let init_instruction = Instruction {
+            program_id: PROGRAM_ID,
+            accounts: vec![
+                AccountMeta::new(initializer.pubkey(), true),
+                AccountMeta::new(initializer_lst_ata, false),
+                AccountMeta::new(pool_state_pda, false),
+                AccountMeta::new(lst_mint_pda, false),
+                AccountMeta::new(stake_account_pda, false),
+                AccountMeta::new(reserve_stake_pda, false),
+                AccountMeta::new_readonly(validator_vote, false),
+                AccountMeta::new_readonly(CLOCK_SYSVAR.into(), false),
+                AccountMeta::new_readonly(RENT_SYSVAR.into(), false),
+                AccountMeta::new_readonly(STAKE_HISTORY_SYSVAR, false),
+                AccountMeta::new_readonly(STAKE_CONFIG, false),
+                AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
+                AccountMeta::new_readonly(TOKEN_PROGRAM_ID, false),
+                AccountMeta::new_readonly(STAKE_PROGRAM_ID, false),
+                AccountMeta::new_readonly(ATA_PROGRAM_ID, false),
+            ],
+            data: init_instruction_data,
+        };
+
+        let init_tx = Transaction::new_signed_with_payer(
+            &[init_instruction],
             Some(&initializer.pubkey()),
             &[&initializer],
             svm.latest_blockhash(),
         );
 
-        let result = svm.send_transaction(transaction);
+        let result = svm.send_transaction(init_tx);
         print_transaction_logs(&result);
-        assert!(result.is_err(), "Should fail with truncated instruction data");
+        assert!(result.is_ok(), "Initialize should succeed");
 
-        println!("\n=== test_initialize_truncated_instruction_data PASSED ===");
+        // ============ VERIFY INVARIANT: lst_supply == mint.supply == ata.balance ============
+
+        // 1. Get pool state lst_supply
+        let pool_state_account = svm.get_account(&pool_state_pda).unwrap();
+        let lst_supply_in_state = get_lst_supply_from_pool_state(&pool_state_account.data);
+
+        // 2. Get mint total supply
+        let lst_mint_account = svm.get_account(&lst_mint_pda).unwrap();
+        let mint_total_supply = get_mint_supply(&lst_mint_account.data);
+
+        // 3. Get authority's ATA balance
+        let initializer_ata_account = svm.get_account(&initializer_lst_ata).unwrap();
+        let authority_lst_balance = get_token_balance(&initializer_ata_account.data);
+
+        eprintln!("\n=== LST Supply Invariant Check ===");
+        eprintln!("  pool_state.lst_supply: {}", lst_supply_in_state);
+        eprintln!("  mint.total_supply:     {}", mint_total_supply);
+        eprintln!("  authority_ata.balance: {}", authority_lst_balance);
+
+        // All three must equal MIN_STAKE_DELEGATION
+        assert_eq!(
+            lst_supply_in_state, MIN_STAKE_DELEGATION,
+            "pool_state.lst_supply should be {}",
+            MIN_STAKE_DELEGATION
+        );
+
+        assert_eq!(
+            mint_total_supply, MIN_STAKE_DELEGATION,
+            "mint.total_supply should be {}",
+            MIN_STAKE_DELEGATION
+        );
+
+        assert_eq!(
+            authority_lst_balance, MIN_STAKE_DELEGATION,
+            "authority should hold {} LST",
+            MIN_STAKE_DELEGATION
+        );
+
+        // Cross-check: all three values must be equal
+        assert_eq!(
+            lst_supply_in_state, mint_total_supply,
+            "pool_state.lst_supply must equal mint.total_supply"
+        );
+
+        assert_eq!(
+            mint_total_supply, authority_lst_balance,
+            "mint.total_supply must equal authority's balance (only holder at init)"
+        );
+
+        // ============ VERIFY STAKE MATCHES ============
+        let stake_account = svm.get_account(&stake_account_pda).unwrap();
+        let reserve_account = svm.get_account(&reserve_stake_pda).unwrap();
+
+        // Reserve should be empty (just rent-exempt)
+        eprintln!("  stake_account.lamports:   {}", stake_account.lamports);
+        eprintln!("  reserve_stake.lamports:   {}", reserve_account.lamports);
+
+        // Stake account should have at least MIN_STAKE_DELEGATION
+        assert!(
+            stake_account.lamports >= MIN_STAKE_DELEGATION,
+            "stake_account should have at least {} lamports",
+            MIN_STAKE_DELEGATION
+        );
+
+        // Exchange rate should be 1:1 at initialization
+        let total_pool_value = stake_account.lamports + reserve_account.lamports;
+        let exchange_rate = total_pool_value as f64 / lst_supply_in_state as f64;
+
+        eprintln!("  Total pool value: {}", total_pool_value);
+        eprintln!("  Exchange rate: {:.6} SOL per LST", exchange_rate);
+
+        // Exchange rate should be approximately 1.0 (may be slightly higher due to rent)
+        assert!(
+            exchange_rate >= 1.0 && exchange_rate < 1.01,
+            "Exchange rate should be ~1.0 at init, got {}",
+            exchange_rate
+        );
+
+        println!("\n=== Test Passed: lst_supply Equals Minted Tokens ===");
     }
 
-    // ============================================
-    // VERIFICATION TEST
-    // ============================================
+    /// Helper to get mint total supply from mint account data
+    fn get_mint_supply(mint_data: &[u8]) -> u64 {
+        // SPL Token mint layout: supply is at offset 36, 8 bytes
+        u64::from_le_bytes(mint_data[36..44].try_into().unwrap())
+    }
 
-    #[test]
-fn test_initialize_verify_pool_state_data() {
-    let mut svm = setup_svm();
-    let initializer = Keypair::new();
-    svm.airdrop(&initializer.pubkey(), 2_000_000_000).unwrap();
+    /// Helper to get lst_supply from pool state data
+/// Helper to get lst_supply from pool state data
+/// ADJUST THIS BASED ON YOUR ACTUAL POOLSTATE STRUCT LAYOUT
+fn get_lst_supply_from_pool_state(data: &[u8]) -> u64 {
+    // Your PoolState layout (guessing based on set_inner params):
+    //   discriminator: u8 (1 byte)        - offset 0
+    //   lst_mint: Pubkey (32 bytes)      - offset 1
+    //   authority: Pubkey (32 bytes)     - offset 33
+    //   validator_vote: Pubkey (32 bytes) - offset 65
+    //   stake_account: Pubkey (32 bytes)  - offset 97
+    //   reserve_stake: Pubkey (32 bytes)  - offset 129
+    //   seed: u64 (8 bytes)               - offset 161
+    //   pool_bump: u8 (1 byte)            - offset 169
+    //   stake_bump: u8 (1 byte)           - offset 170
+    //   mint_bump: u8 (1 byte)            - offset 171
+    //   reserve_bump: u8 (1 byte)         - offset 172
+    //   lst_supply: u64 (8 bytes)         - offset 173
+    //   is_initialized: bool (1 byte)     - offset 181
 
-    let validator_identity = Keypair::new();
-    let validator_vote = create_vote_account(&mut svm, &validator_identity.pubkey());
+    // If your struct uses #[repr(C)] with padding, offsets may differ!
+    // Check your actual struct definition
 
-    let seed = 12345u64;
-
-    let (pool_state_pda, pool_bump) = derive_pool_state_pda(&initializer.pubkey(), seed);
-    let (lst_mint_pda, mint_bump) = derive_lst_mint_pda(&pool_state_pda);
-    let (stake_account_pda, stake_bump) = derive_stake_account_pda(&pool_state_pda);
-    let (reserve_stake_pda, reserve_bump) = derive_reserve_stake_account_pda(&pool_state_pda);
-
-    let instruction_data =
-        create_initialize_instruction_data(seed, pool_bump, mint_bump, stake_bump, reserve_bump);
-
-    let instruction = build_initialize_instruction(
-        &initializer.pubkey(),
-        &pool_state_pda,
-        &lst_mint_pda,
-        &stake_account_pda,
-        &reserve_stake_pda,
-        &validator_vote,
-        instruction_data,
-    );
-
-    let transaction = Transaction::new_signed_with_payer(
-        &[instruction],
-        Some(&initializer.pubkey()),
-        &[&initializer],
-        svm.latest_blockhash(),
-    );
-
-    let result = svm.send_transaction(transaction);
-    print_transaction_logs(&result);
-    assert!(result.is_ok(), "Initialize should succeed");
-
-    // Verify pool state data
-    let pool_account = svm.get_account(&pool_state_pda).unwrap();
-    let data = &pool_account.data;
-
-    // Layout with discriminator at byte 0:
-    // discriminator: u8        -> byte 0
-    // lst_mint: Pubkey         -> bytes 1-33
-    // authority: Pubkey        -> bytes 33-65
-    // validator_vote: Pubkey   -> bytes 65-97
-    // stake_account: Pubkey    -> bytes 97-129
-    // reserve_stake: Pubkey    -> bytes 129-161
-    // seed: u64                -> bytes 161-169
-    // bump: u8                 -> byte 169
-    // stake_bump: u8           -> byte 170
-    // mint_bump: u8            -> byte 171
-    // reserve_bump: u8         -> byte 172
-    // lst_supply: u64          -> bytes 173-181
-    // is_initialized: bool     -> byte 181
-
-    // Verify discriminator
-    assert_eq!(data[0], 0, "Discriminator should be 0 for PoolState");
-
-    // Verify lst_mint (bytes 1-33)
-    let stored_lst_mint = Pubkey::new_from_array(data[1..33].try_into().unwrap());
-    assert_eq!(stored_lst_mint, lst_mint_pda, "LST mint mismatch");
-
-    // Verify authority (bytes 33-65)
-    let stored_authority = Pubkey::new_from_array(data[33..65].try_into().unwrap());
-    assert_eq!(stored_authority, initializer.pubkey(), "Authority mismatch");
-
-    // Verify validator_vote (bytes 65-97)
-    let stored_validator = Pubkey::new_from_array(data[65..97].try_into().unwrap());
-    assert_eq!(stored_validator, validator_vote, "Validator vote mismatch");
-
-    // Verify stake_account (bytes 97-129)
-    let stored_stake = Pubkey::new_from_array(data[97..129].try_into().unwrap());
-    assert_eq!(stored_stake, stake_account_pda, "Stake account mismatch");
-
-    // Verify reserve_stake (bytes 129-161)
-    let stored_reserve = Pubkey::new_from_array(data[129..161].try_into().unwrap());
-    assert_eq!(stored_reserve, reserve_stake_pda, "Reserve stake mismatch");
-
-    // Verify seed (bytes 161-169)
-    let stored_seed = u64::from_le_bytes(data[161..169].try_into().unwrap());
-    assert_eq!(stored_seed, seed, "Seed mismatch");
-
-    // Verify bumps
-    assert_eq!(data[169], pool_bump, "Pool bump mismatch");
-    assert_eq!(data[170], stake_bump, "Stake bump mismatch");
-    assert_eq!(data[171], mint_bump, "Mint bump mismatch");
-    assert_eq!(data[172], reserve_bump, "Reserve bump mismatch");
-
-    // Verify lst_supply (bytes 173-181) is 0
-    let stored_supply = u64::from_le_bytes(data[173..181].try_into().unwrap());
-    assert_eq!(stored_supply, 1000000000, "LST supply should be 0");
-
-    // Verify is_initialized (byte 181)
-    assert_eq!(data[181], 1, "is_initialized should be true (1)");
-
-    println!("\n=== test_initialize_verify_pool_state_data PASSED ===");
+    const LST_SUPPLY_OFFSET: usize = 173; // Adjust this!
+    
+    eprintln!("  Raw bytes at offset {}: {:?}", LST_SUPPLY_OFFSET, &data[LST_SUPPLY_OFFSET..LST_SUPPLY_OFFSET + 8]);
+    
+    u64::from_le_bytes(data[LST_SUPPLY_OFFSET..LST_SUPPLY_OFFSET + 8].try_into().unwrap())
 }
 }

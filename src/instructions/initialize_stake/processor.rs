@@ -7,11 +7,12 @@ use pinocchio::{
     sysvars::{Sysvar, rent::Rent},
 };
 use pinocchio_system::instructions::CreateAccount;
-use pinocchio_token::instructions::{InitializeMint2};
+use pinocchio_token::instructions::{InitializeMint2, MintTo};
 
 use super::{InitializeAccounts, InitializeData};
 use crate::{
-    PoolState, ProgramAccount, constants::*, create_stake_account, delegate_stake, initialize_stake,
+    AssociatedToken, PoolState, ProgramAccount, constants::*, create_stake_account, delegate_stake,
+    initialize_stake,
 };
 
 pub struct Initialize<'a> {
@@ -101,6 +102,15 @@ impl<'a> Initialize<'a> {
         self.create_pool_state(&pool_seeds)?;
         self.create_lst_mint(&mint_bump)?;
 
+        AssociatedToken::init_if_needed(
+            self.accounts.initializer_lst_ata,
+            self.accounts.lst_mint,
+            self.accounts.initializer,
+            self.accounts.initializer,
+            self.accounts.system_program,
+            self.accounts.token_program,
+        )?;
+
         create_stake_account(
             self.accounts.initializer,
             self.accounts.reserve_stake,
@@ -131,6 +141,22 @@ impl<'a> Initialize<'a> {
             self.accounts.pool_state,
             &pool_seeds,
         )?;
+
+        self.mint_initial_lst(&pool_seeds)?;
+
+        Ok(())
+    }
+
+    fn mint_initial_lst(&self, pool_seeds: &[Seed]) -> ProgramResult {
+        let signer = [Signer::from(pool_seeds)];
+
+        MintTo {
+            mint: self.accounts.lst_mint,
+            account: self.accounts.initializer_lst_ata, // Need to add this account
+            mint_authority: self.accounts.pool_state,
+            amount: MIN_STAKE_DELEGATION,
+        }
+        .invoke_signed(&signer)?;
 
         Ok(())
     }

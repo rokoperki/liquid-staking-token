@@ -9,7 +9,7 @@ mod tests {
         signature::{Keypair, Signer},
         transaction::Transaction,
     };
-    use spl_associated_token_account::ID as ATA_PROGRAM_ID;
+    use spl_associated_token_account::{ID as ATA_PROGRAM_ID, get_associated_token_address};
     use spl_token::ID as TOKEN_PROGRAM_ID;
 
     const PROGRAM_ID: Pubkey = Pubkey::new_from_array([
@@ -168,6 +168,8 @@ mod tests {
         let (lst_mint_pda, mint_bump) = derive_lst_mint_pda(&pool_state_pda);
         let (stake_account_pda, stake_bump) = derive_stake_account_pda(&pool_state_pda);
         let (reserve_stake_pda, reserve_bump) = derive_reserve_stake_account_pda(&pool_state_pda);
+        let initializer_lst_ata =
+            get_associated_token_address(&initializer.pubkey(), &lst_mint_pda);
 
         let instruction_data = create_initialize_instruction_data(
             seed,
@@ -181,6 +183,7 @@ mod tests {
             program_id: PROGRAM_ID,
             accounts: vec![
                 AccountMeta::new(initializer.pubkey(), true), // initializer
+                AccountMeta::new(initializer_lst_ata, false), // initializer_lst_ata
                 AccountMeta::new(pool_state_pda, false),      // pool_state
                 AccountMeta::new(lst_mint_pda, false),        // lst_mint
                 AccountMeta::new(stake_account_pda, false),   // stake_account
@@ -193,6 +196,7 @@ mod tests {
                 AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false), // system_program
                 AccountMeta::new_readonly(TOKEN_PROGRAM_ID, false), // token_program
                 AccountMeta::new_readonly(STAKE_PROGRAM_ID, false), // stake_program
+                AccountMeta::new_readonly(ATA_PROGRAM_ID, false), // ata_program
             ],
             data: instruction_data,
         };
@@ -245,14 +249,14 @@ mod tests {
         let instruction = Instruction {
             program_id: PROGRAM_ID,
             accounts: vec![
-                AccountMeta::new(pool_state_pda, false),          // pool_state
+                AccountMeta::new(pool_state_pda, false), // pool_state
                 AccountMeta::new_readonly(pool_stake_pda, false), // pool_stake
-                AccountMeta::new(reserve_stake_pda, false),       // reserve_stake
+                AccountMeta::new(reserve_stake_pda, false), // reserve_stake
                 AccountMeta::new_readonly(validator_vote, false), // validator_vote
                 AccountMeta::new_readonly(CLOCK_SYSVAR.into(), false), // clock
                 AccountMeta::new_readonly(RENT_SYSVAR.into(), false), // rent
                 AccountMeta::new_readonly(STAKE_HISTORY_SYSVAR, false), // stake_history
-                AccountMeta::new_readonly(STAKE_CONFIG, false),   // stake_config
+                AccountMeta::new_readonly(STAKE_CONFIG, false), // stake_config
                 AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false), // system_program
                 AccountMeta::new_readonly(STAKE_PROGRAM_ID, false), // stake_program
             ],
@@ -289,5 +293,299 @@ mod tests {
         println!("  Owner: {:?}", reserve_after.owner);
         println!("  Lamports: {}", reserve_after.lamports);
         println!("  Data length: {}", reserve_after.data.len());
+    }
+
+    #[test]
+    fn test_double_initialize_reserve_fails() {
+        let mut svm = setup_svm();
+
+        // Initialize pool
+        let (_, pool_state_pda, _, pool_stake_pda, reserve_stake_pda, validator_vote, _) =
+            initialize_pool(&mut svm);
+
+        // Fund reserve for initialization
+        svm.airdrop(&reserve_stake_pda, 1_000_000_000).unwrap();
+
+        let crank = Keypair::new();
+        svm.airdrop(&crank.pubkey(), 1_000_000_000).unwrap();
+
+        let instruction_data = vec![2u8]; // Discriminator for InitializeReserve
+
+        let instruction = Instruction {
+            program_id: PROGRAM_ID,
+            accounts: vec![
+                AccountMeta::new(pool_state_pda, false),
+                AccountMeta::new_readonly(pool_stake_pda, false),
+                AccountMeta::new(reserve_stake_pda, false),
+                AccountMeta::new_readonly(validator_vote, false),
+                AccountMeta::new_readonly(CLOCK_SYSVAR.into(), false),
+                AccountMeta::new_readonly(RENT_SYSVAR.into(), false),
+                AccountMeta::new_readonly(STAKE_HISTORY_SYSVAR, false),
+                AccountMeta::new_readonly(STAKE_CONFIG, false),
+                AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
+                AccountMeta::new_readonly(STAKE_PROGRAM_ID, false),
+            ],
+            data: instruction_data.clone(),
+        };
+
+        // First initialization should succeed
+        let tx1 = Transaction::new_signed_with_payer(
+            &[instruction.clone()],
+            Some(&crank.pubkey()),
+            &[&crank],
+            svm.latest_blockhash(),
+        );
+
+        let result = svm.send_transaction(tx1);
+        print_transaction_logs(&result);
+        assert!(result.is_ok(), "First InitializeReserve should succeed");
+
+        // Verify reserve is initialized
+        let reserve_after_first = svm.get_account(&reserve_stake_pda).unwrap();
+        assert_eq!(
+            reserve_after_first.owner, STAKE_PROGRAM_ID,
+            "Reserve should be owned by stake program"
+        );
+
+        // Second initialization should FAIL
+        let tx2 = Transaction::new_signed_with_payer(
+            &[instruction],
+            Some(&crank.pubkey()),
+            &[&crank],
+            svm.latest_blockhash(),
+        );
+
+        let result = svm.send_transaction(tx2);
+        print_transaction_logs(&result);
+        assert!(
+            result.is_err(),
+            "Second InitializeReserve should fail - already initialized"
+        );
+
+        println!("\n=== Test Passed: Double Initialize Reserve Rejected ===");
+    }
+
+    #[test]
+    fn test_initialize_reserve_wrong_validator_fails() {
+        let mut svm = setup_svm();
+    
+        // Initialize pool with validator A
+        let (_, pool_state_pda, _, pool_stake_pda, reserve_stake_pda, _validator_vote, _) =
+            initialize_pool(&mut svm);
+    
+        // Fund reserve
+        svm.airdrop(&reserve_stake_pda, 1_000_000_000).unwrap();
+    
+        // Create a DIFFERENT validator vote account
+        let attacker_identity = Keypair::new();
+        let attacker_validator = create_vote_account(&mut svm, &attacker_identity.pubkey());
+    
+        let crank = Keypair::new();
+        svm.airdrop(&crank.pubkey(), 1_000_000_000).unwrap();
+    
+        let instruction_data = vec![2u8];
+    
+        // Try to initialize with wrong validator
+        let instruction = Instruction {
+            program_id: PROGRAM_ID,
+            accounts: vec![
+                AccountMeta::new(pool_state_pda, false),
+                AccountMeta::new_readonly(pool_stake_pda, false),
+                AccountMeta::new(reserve_stake_pda, false),
+                AccountMeta::new_readonly(attacker_validator, false), // WRONG validator
+                AccountMeta::new_readonly(CLOCK_SYSVAR.into(), false),
+                AccountMeta::new_readonly(RENT_SYSVAR.into(), false),
+                AccountMeta::new_readonly(STAKE_HISTORY_SYSVAR, false),
+                AccountMeta::new_readonly(STAKE_CONFIG, false),
+                AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
+                AccountMeta::new_readonly(STAKE_PROGRAM_ID, false),
+            ],
+            data: instruction_data,
+        };
+    
+        let transaction = Transaction::new_signed_with_payer(
+            &[instruction],
+            Some(&crank.pubkey()),
+            &[&crank],
+            svm.latest_blockhash(),
+        );
+    
+        let result = svm.send_transaction(transaction);
+        print_transaction_logs(&result);
+    
+        assert!(
+            result.is_err(),
+            "InitializeReserve with wrong validator should fail"
+        );
+    
+        // The important thing is that the transaction failed.
+        // We don't need to check reserve owner since it may already be 
+        // owned by stake program from initialize_pool (just not delegated yet)
+    
+        println!("\n=== Test Passed: Wrong Validator Rejected ===");
+    }
+
+    #[test]
+    fn test_initialize_reserve_insufficient_funds_fails() {
+        let mut svm = setup_svm();
+
+        // Initialize pool
+        let (_, pool_state_pda, _, pool_stake_pda, reserve_stake_pda, validator_vote, _) =
+            initialize_pool(&mut svm);
+
+        // Do NOT fund reserve sufficiently - it only has rent from creation
+        // Need STAKE_ACCOUNT_SIZE + MIN_STAKE_DELEGATION but we give much less
+        let reserve_account = svm.get_account(&reserve_stake_pda).unwrap();
+        eprintln!("Reserve lamports before: {}", reserve_account.lamports);
+
+        let crank = Keypair::new();
+        svm.airdrop(&crank.pubkey(), 1_000_000_000).unwrap();
+
+        let instruction_data = vec![2u8];
+
+        let instruction = Instruction {
+            program_id: PROGRAM_ID,
+            accounts: vec![
+                AccountMeta::new(pool_state_pda, false),
+                AccountMeta::new_readonly(pool_stake_pda, false),
+                AccountMeta::new(reserve_stake_pda, false),
+                AccountMeta::new_readonly(validator_vote, false),
+                AccountMeta::new_readonly(CLOCK_SYSVAR.into(), false),
+                AccountMeta::new_readonly(RENT_SYSVAR.into(), false),
+                AccountMeta::new_readonly(STAKE_HISTORY_SYSVAR, false),
+                AccountMeta::new_readonly(STAKE_CONFIG, false),
+                AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
+                AccountMeta::new_readonly(STAKE_PROGRAM_ID, false),
+            ],
+            data: instruction_data,
+        };
+
+        let transaction = Transaction::new_signed_with_payer(
+            &[instruction],
+            Some(&crank.pubkey()),
+            &[&crank],
+            svm.latest_blockhash(),
+        );
+
+        let result = svm.send_transaction(transaction);
+        print_transaction_logs(&result);
+
+        assert!(
+            result.is_err(),
+            "InitializeReserve with insufficient funds should fail"
+        );
+
+        println!("\n=== Test Passed: Insufficient Funds Rejected ===");
+    }
+
+    #[test]
+    fn test_initialize_reserve_uninitialized_pool_fails() {
+        let mut svm = setup_svm();
+
+        // Create PDAs WITHOUT initializing the pool
+        let fake_initializer = Keypair::new();
+        let seed = 99999u64;
+
+        let (pool_state_pda, _) = derive_pool_state_pda(&fake_initializer.pubkey(), seed);
+        let (pool_stake_pda, _) = derive_stake_account_pda(&pool_state_pda);
+        let (reserve_stake_pda, _) = derive_reserve_stake_account_pda(&pool_state_pda);
+
+        // Create a validator vote account
+        let validator_identity = Keypair::new();
+        let validator_vote = create_vote_account(&mut svm, &validator_identity.pubkey());
+
+        let crank = Keypair::new();
+        svm.airdrop(&crank.pubkey(), 2_000_000_000).unwrap();
+
+        // Fund the non-existent reserve
+        svm.airdrop(&reserve_stake_pda, 1_500_000_000).unwrap();
+
+        let instruction_data = vec![2u8];
+
+        let instruction = Instruction {
+            program_id: PROGRAM_ID,
+            accounts: vec![
+                AccountMeta::new(pool_state_pda, false),
+                AccountMeta::new_readonly(pool_stake_pda, false),
+                AccountMeta::new(reserve_stake_pda, false),
+                AccountMeta::new_readonly(validator_vote, false),
+                AccountMeta::new_readonly(CLOCK_SYSVAR.into(), false),
+                AccountMeta::new_readonly(RENT_SYSVAR.into(), false),
+                AccountMeta::new_readonly(STAKE_HISTORY_SYSVAR, false),
+                AccountMeta::new_readonly(STAKE_CONFIG, false),
+                AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
+                AccountMeta::new_readonly(STAKE_PROGRAM_ID, false),
+            ],
+            data: instruction_data,
+        };
+
+        let transaction = Transaction::new_signed_with_payer(
+            &[instruction],
+            Some(&crank.pubkey()),
+            &[&crank],
+            svm.latest_blockhash(),
+        );
+
+        let result = svm.send_transaction(transaction);
+        print_transaction_logs(&result);
+
+        assert!(
+            result.is_err(),
+            "InitializeReserve on uninitialized pool should fail"
+        );
+
+        println!("\n=== Test Passed: Uninitialized Pool Rejected ===");
+    }
+
+    #[test]
+    fn test_initialize_reserve_wrong_reserve_account_fails() {
+        let mut svm = setup_svm();
+
+        // Initialize pool
+        let (_, pool_state_pda, _, pool_stake_pda, _reserve_stake_pda, validator_vote, _) =
+            initialize_pool(&mut svm);
+
+        // Create a FAKE reserve account (not the real PDA)
+        let fake_reserve = Keypair::new();
+        svm.airdrop(&fake_reserve.pubkey(), 2_000_000_000).unwrap();
+
+        let crank = Keypair::new();
+        svm.airdrop(&crank.pubkey(), 1_000_000_000).unwrap();
+
+        let instruction_data = vec![2u8];
+
+        let instruction = Instruction {
+            program_id: PROGRAM_ID,
+            accounts: vec![
+                AccountMeta::new(pool_state_pda, false),
+                AccountMeta::new_readonly(pool_stake_pda, false),
+                AccountMeta::new(fake_reserve.pubkey(), false), // WRONG reserve
+                AccountMeta::new_readonly(validator_vote, false),
+                AccountMeta::new_readonly(CLOCK_SYSVAR.into(), false),
+                AccountMeta::new_readonly(RENT_SYSVAR.into(), false),
+                AccountMeta::new_readonly(STAKE_HISTORY_SYSVAR, false),
+                AccountMeta::new_readonly(STAKE_CONFIG, false),
+                AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
+                AccountMeta::new_readonly(STAKE_PROGRAM_ID, false),
+            ],
+            data: instruction_data,
+        };
+
+        let transaction = Transaction::new_signed_with_payer(
+            &[instruction],
+            Some(&crank.pubkey()),
+            &[&crank],
+            svm.latest_blockhash(),
+        );
+
+        let result = svm.send_transaction(transaction);
+        print_transaction_logs(&result);
+
+        assert!(
+            result.is_err(),
+            "InitializeReserve with wrong reserve account should fail"
+        );
+
+        println!("\n=== Test Passed: Wrong Reserve Account Rejected ===");
     }
 }

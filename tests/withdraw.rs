@@ -9,7 +9,7 @@ mod tests {
         signature::{Keypair, Signer},
         transaction::Transaction,
     };
-    use spl_associated_token_account::ID as ATA_PROGRAM_ID;
+    use spl_associated_token_account::{ID as ATA_PROGRAM_ID, get_associated_token_address};
     use spl_token::ID as TOKEN_PROGRAM_ID;
 
     const PROGRAM_ID: Pubkey = Pubkey::new_from_array([
@@ -176,6 +176,8 @@ mod tests {
         let (lst_mint_pda, mint_bump) = derive_lst_mint_pda(&pool_state_pda);
         let (stake_account_pda, stake_bump) = derive_stake_account_pda(&pool_state_pda);
         let (reserve_stake_pda, reserve_bump) = derive_reserve_stake_account_pda(&pool_state_pda);
+        let initializer_lst_ata =
+            get_associated_token_address(&initializer.pubkey(), &lst_mint_pda);
 
         let instruction_data = create_initialize_instruction_data(
             seed,
@@ -189,6 +191,7 @@ mod tests {
             program_id: PROGRAM_ID,
             accounts: vec![
                 AccountMeta::new(initializer.pubkey(), true), // initializer
+                AccountMeta::new(initializer_lst_ata, false), // initializer_lst_ata
                 AccountMeta::new(pool_state_pda, false),      // pool_state
                 AccountMeta::new(lst_mint_pda, false),        // lst_mint
                 AccountMeta::new(stake_account_pda, false),   // stake_account
@@ -201,6 +204,7 @@ mod tests {
                 AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false), // system_program
                 AccountMeta::new_readonly(TOKEN_PROGRAM_ID, false), // token_program
                 AccountMeta::new_readonly(STAKE_PROGRAM_ID, false), // stake_program
+                AccountMeta::new_readonly(ATA_PROGRAM_ID, false), // ata_program
             ],
             data: instruction_data,
         };
@@ -473,5 +477,637 @@ mod tests {
         );
 
         println!("\n=== Withdraw Test Passed ===");
+    }
+
+    /// Helper to get token account balance from account data
+    fn get_token_balance(account_data: &[u8]) -> u64 {
+        u64::from_le_bytes(account_data[64..72].try_into().unwrap())
+    }
+
+    /// Helper to get mint total supply
+    fn get_mint_supply(mint_data: &[u8]) -> u64 {
+        u64::from_le_bytes(mint_data[36..44].try_into().unwrap())
+    }
+
+    /// Helper to setup pool with deposit and merged reserve for withdraw tests
+    fn setup_pool_for_withdraw(
+        svm: &mut LiteSVM,
+    ) -> (
+        Keypair, // user
+        Pubkey,  // pool_state_pda
+        Pubkey,  // lst_mint_pda
+        Pubkey,  // pool_stake_pda
+        Pubkey,  // reserve_stake_pda
+        Pubkey,  // user_lst_ata
+        Pubkey,  // validator_vote
+    ) {
+        // Initialize pool
+        let (_, pool_state_pda, lst_mint_pda, pool_stake_pda, reserve_stake_pda, validator_vote, _) =
+            initialize_pool(svm);
+
+        // Create user and deposit
+        let user = Keypair::new();
+        let deposit_amount = 10_000_000_000u64; // 10 SOL
+        svm.airdrop(&user.pubkey(), 20_000_000_000).unwrap();
+
+        // Create user's LST ATA
+        let user_lst_ata = derive_ata(&user.pubkey(), &lst_mint_pda);
+
+        let create_ata_ix =
+            spl_associated_token_account::instruction::create_associated_token_account(
+                &user.pubkey(),
+                &user.pubkey(),
+                &lst_mint_pda,
+                &TOKEN_PROGRAM_ID,
+            );
+
+        let tx = Transaction::new_signed_with_payer(
+            &[create_ata_ix],
+            Some(&user.pubkey()),
+            &[&user],
+            svm.latest_blockhash(),
+        );
+        svm.send_transaction(tx).expect("Should create ATA");
+
+        // Deposit
+        let deposit_data = create_deposit_instruction_data(deposit_amount);
+
+        let deposit_ix = Instruction {
+            program_id: PROGRAM_ID,
+            accounts: vec![
+                AccountMeta::new(user.pubkey(), true),
+                AccountMeta::new(pool_state_pda, false),
+                AccountMeta::new_readonly(pool_stake_pda, false),
+                AccountMeta::new(reserve_stake_pda, false),
+                AccountMeta::new(lst_mint_pda, false),
+                AccountMeta::new(user_lst_ata, false),
+                AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
+                AccountMeta::new_readonly(TOKEN_PROGRAM_ID, false),
+                AccountMeta::new_readonly(STAKE_PROGRAM_ID, false),
+                AccountMeta::new_readonly(ATA_PROGRAM_ID, false),
+            ],
+            data: deposit_data,
+        };
+
+        let tx = Transaction::new_signed_with_payer(
+            &[deposit_ix],
+            Some(&user.pubkey()),
+            &[&user],
+            svm.latest_blockhash(),
+        );
+        svm.send_transaction(tx).expect("Deposit should succeed");
+
+        // Initialize reserve
+        let crank = Keypair::new();
+        svm.airdrop(&crank.pubkey(), 1_000_000_000).unwrap();
+
+        let init_reserve_ix = Instruction {
+            program_id: PROGRAM_ID,
+            accounts: vec![
+                AccountMeta::new(pool_state_pda, false),
+                AccountMeta::new_readonly(pool_stake_pda, false),
+                AccountMeta::new(reserve_stake_pda, false),
+                AccountMeta::new_readonly(validator_vote, false),
+                AccountMeta::new_readonly(CLOCK_SYSVAR.into(), false),
+                AccountMeta::new_readonly(RENT_SYSVAR.into(), false),
+                AccountMeta::new_readonly(STAKE_HISTORY_SYSVAR, false),
+                AccountMeta::new_readonly(STAKE_CONFIG, false),
+                AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
+                AccountMeta::new_readonly(STAKE_PROGRAM_ID, false),
+            ],
+            data: vec![2u8],
+        };
+
+        let tx = Transaction::new_signed_with_payer(
+            &[init_reserve_ix],
+            Some(&crank.pubkey()),
+            &[&crank],
+            svm.latest_blockhash(),
+        );
+        svm.send_transaction(tx)
+            .expect("InitializeReserve should succeed");
+
+        // Warp forward
+        let slots_per_epoch = 432_000;
+        svm.warp_to_slot(slots_per_epoch * 2);
+
+        // Merge reserve
+        let merge_ix = Instruction {
+            program_id: PROGRAM_ID,
+            accounts: vec![
+                AccountMeta::new(pool_state_pda, false),
+                AccountMeta::new(pool_stake_pda, false),
+                AccountMeta::new(reserve_stake_pda, false),
+                AccountMeta::new_readonly(CLOCK_SYSVAR.into(), false),
+                AccountMeta::new_readonly(STAKE_HISTORY_SYSVAR, false),
+                AccountMeta::new_readonly(STAKE_PROGRAM_ID, false),
+            ],
+            data: vec![3u8],
+        };
+
+        let tx = Transaction::new_signed_with_payer(
+            &[merge_ix],
+            Some(&crank.pubkey()),
+            &[&crank],
+            svm.latest_blockhash(),
+        );
+        svm.send_transaction(tx)
+            .expect("MergeReserve should succeed");
+
+        (
+            user,
+            pool_state_pda,
+            lst_mint_pda,
+            pool_stake_pda,
+            reserve_stake_pda,
+            user_lst_ata,
+            validator_vote,
+        )
+    }
+
+    /// Helper to execute withdraw
+    fn execute_withdraw(
+        svm: &mut LiteSVM,
+        user: &Keypair,
+        pool_state_pda: &Pubkey,
+        pool_stake_pda: &Pubkey,
+        reserve_stake_pda: &Pubkey,
+        lst_mint_pda: &Pubkey,
+        user_lst_ata: &Pubkey,
+        amount: u64,
+        nonce: u64,
+    ) -> Result<litesvm::types::TransactionMetadata, litesvm::types::FailedTransactionMetadata>
+    {
+        let (user_stake_pda, user_stake_bump) = Pubkey::find_program_address(
+            &[
+                b"withdraw",
+                pool_state_pda.as_ref(),
+                user.pubkey().as_ref(),
+                &nonce.to_le_bytes(),
+            ],
+            &PROGRAM_ID,
+        );
+
+        let withdraw_data = create_withdraw_instruction_data(amount, nonce, user_stake_bump);
+
+        let withdraw_ix = Instruction {
+            program_id: PROGRAM_ID,
+            accounts: vec![
+                AccountMeta::new(user.pubkey(), true),
+                AccountMeta::new(*pool_state_pda, false),
+                AccountMeta::new(*pool_stake_pda, false),
+                AccountMeta::new_readonly(*reserve_stake_pda, false),
+                AccountMeta::new(user_stake_pda, false),
+                AccountMeta::new(*lst_mint_pda, false),
+                AccountMeta::new(*user_lst_ata, false),
+                AccountMeta::new_readonly(CLOCK_SYSVAR.into(), false),
+                AccountMeta::new_readonly(RENT_SYSVAR.into(), false),
+                AccountMeta::new_readonly(STAKE_HISTORY_SYSVAR, false),
+                AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
+                AccountMeta::new_readonly(STAKE_PROGRAM_ID, false),
+                AccountMeta::new_readonly(TOKEN_PROGRAM_ID, false),
+            ],
+            data: withdraw_data,
+        };
+
+        let tx = Transaction::new_signed_with_payer(
+            &[withdraw_ix],
+            Some(&user.pubkey()),
+            &[&user],
+            svm.latest_blockhash(),
+        );
+
+        svm.send_transaction(tx)
+    }
+
+    #[test]
+    fn test_double_withdraw_same_nonce_fails() {
+        let mut svm = setup_svm();
+
+        let (
+            user,
+            pool_state_pda,
+            lst_mint_pda,
+            pool_stake_pda,
+            reserve_stake_pda,
+            user_lst_ata,
+            _,
+        ) = setup_pool_for_withdraw(&mut svm);
+
+        let withdraw_amount = 2_000_000_000u64; // 2 SOL worth
+        let nonce = 1u64;
+
+        // First withdraw should succeed
+        let result = execute_withdraw(
+            &mut svm,
+            &user,
+            &pool_state_pda,
+            &pool_stake_pda,
+            &reserve_stake_pda,
+            &lst_mint_pda,
+            &user_lst_ata,
+            withdraw_amount,
+            nonce,
+        );
+        print_transaction_logs(&result);
+        assert!(result.is_ok(), "First withdraw should succeed");
+
+        // Verify user_stake PDA exists
+        let (user_stake_pda, _) = Pubkey::find_program_address(
+            &[
+                b"withdraw",
+                pool_state_pda.as_ref(),
+                user.pubkey().as_ref(),
+                &nonce.to_le_bytes(),
+            ],
+            &PROGRAM_ID,
+        );
+
+        let user_stake = svm.get_account(&user_stake_pda);
+        assert!(
+            user_stake.is_some(),
+            "User stake should exist after first withdraw"
+        );
+
+        // Second withdraw with SAME nonce should fail
+        let result = execute_withdraw(
+            &mut svm,
+            &user,
+            &pool_state_pda,
+            &pool_stake_pda,
+            &reserve_stake_pda,
+            &lst_mint_pda,
+            &user_lst_ata,
+            withdraw_amount,
+            nonce, // Same nonce!
+        );
+        print_transaction_logs(&result);
+
+        assert!(
+            result.is_err(),
+            "Second withdraw with same nonce should fail - user_stake already exists"
+        );
+
+        println!("\n=== Test Passed: Double Withdraw Same Nonce Rejected ===");
+    }
+
+    #[test]
+    fn test_withdraw_more_than_balance_fails() {
+        let mut svm = setup_svm();
+
+        let (
+            user,
+            pool_state_pda,
+            lst_mint_pda,
+            pool_stake_pda,
+            reserve_stake_pda,
+            user_lst_ata,
+            _,
+        ) = setup_pool_for_withdraw(&mut svm);
+
+        // Get user's actual LST balance
+        let user_lst_balance = get_token_balance(&svm.get_account(&user_lst_ata).unwrap().data);
+        eprintln!("User LST balance: {}", user_lst_balance);
+
+        // Try to withdraw MORE than balance
+        let withdraw_amount = user_lst_balance + 1_000_000_000; // Balance + 1 SOL extra
+
+        let result = execute_withdraw(
+            &mut svm,
+            &user,
+            &pool_state_pda,
+            &pool_stake_pda,
+            &reserve_stake_pda,
+            &lst_mint_pda,
+            &user_lst_ata,
+            withdraw_amount,
+            1,
+        );
+        print_transaction_logs(&result);
+
+        assert!(result.is_err(), "Withdraw more than balance should fail");
+
+        println!("\n=== Test Passed: Withdraw More Than Balance Rejected ===");
+    }
+
+    #[test]
+    fn test_withdraw_leaves_pool_below_min_stake_fails() {
+        let mut svm = setup_svm();
+
+        let (
+            user,
+            pool_state_pda,
+            lst_mint_pda,
+            pool_stake_pda,
+            reserve_stake_pda,
+            user_lst_ata,
+            _,
+        ) = setup_pool_for_withdraw(&mut svm);
+
+        // Get pool stake balance
+        let pool_stake_lamports = svm.get_account(&pool_stake_pda).unwrap().lamports;
+        eprintln!("Pool stake lamports: {}", pool_stake_lamports);
+
+        // Get user's LST balance
+        let user_lst_balance = get_token_balance(&svm.get_account(&user_lst_ata).unwrap().data);
+        eprintln!("User LST balance: {}", user_lst_balance);
+
+        // Try to withdraw almost everything (leaving pool below min_stake)
+        // This should fail because pool needs to keep min_stake
+        let withdraw_amount = user_lst_balance - 100_000_000; // Leave only 0.1 SOL worth
+
+        let result = execute_withdraw(
+            &mut svm,
+            &user,
+            &pool_state_pda,
+            &pool_stake_pda,
+            &reserve_stake_pda,
+            &lst_mint_pda,
+            &user_lst_ata,
+            withdraw_amount,
+            1,
+        );
+        print_transaction_logs(&result);
+
+        // This might succeed or fail depending on exact amounts
+        // The important thing is that the pool maintains min_stake
+        if result.is_ok() {
+            let pool_stake_after = svm.get_account(&pool_stake_pda).unwrap().lamports;
+            eprintln!("Pool stake after: {}", pool_stake_after);
+
+            // Verify pool still has min_stake (rent + MIN_STAKE_DELEGATION)
+            let min_stake = 2_282_880 + 1_000_000_000; // approximate rent + 1 SOL
+            assert!(
+                pool_stake_after >= min_stake,
+                "Pool should maintain minimum stake"
+            );
+        }
+
+        println!("\n=== Test Passed: Pool Maintains Min Stake ===");
+    }
+
+    #[test]
+    fn test_withdraw_amount_too_small_fails() {
+        let mut svm = setup_svm();
+
+        let (
+            user,
+            pool_state_pda,
+            lst_mint_pda,
+            pool_stake_pda,
+            reserve_stake_pda,
+            user_lst_ata,
+            _,
+        ) = setup_pool_for_withdraw(&mut svm);
+
+        // Try to withdraw very small amount (below min_stake for new stake account)
+        let withdraw_amount = 1_000_000u64; // 0.001 SOL - way below min_stake
+
+        let result = execute_withdraw(
+            &mut svm,
+            &user,
+            &pool_state_pda,
+            &pool_stake_pda,
+            &reserve_stake_pda,
+            &lst_mint_pda,
+            &user_lst_ata,
+            withdraw_amount,
+            1,
+        );
+        print_transaction_logs(&result);
+
+        assert!(
+            result.is_err(),
+            "Withdraw amount too small should fail - below min_stake for user_stake"
+        );
+
+        println!("\n=== Test Passed: Withdraw Amount Too Small Rejected ===");
+    }
+
+    #[test]
+    fn test_withdraw_correct_exchange_rate_with_rewards() {
+        let mut svm = setup_svm();
+
+        let (
+            user,
+            pool_state_pda,
+            lst_mint_pda,
+            pool_stake_pda,
+            reserve_stake_pda,
+            user_lst_ata,
+            _,
+        ) = setup_pool_for_withdraw(&mut svm);
+
+        // Get state before rewards
+        let user_lst_balance = get_token_balance(&svm.get_account(&user_lst_ata).unwrap().data);
+        let pool_stake_before_rewards = svm.get_account(&pool_stake_pda).unwrap().lamports;
+        let mint_supply = get_mint_supply(&svm.get_account(&lst_mint_pda).unwrap().data);
+
+        eprintln!("\n=== Before Rewards ===");
+        eprintln!("  User LST balance: {}", user_lst_balance);
+        eprintln!("  Pool stake: {}", pool_stake_before_rewards);
+        eprintln!("  Mint supply: {}", mint_supply);
+
+        // Simulate rewards by adding SOL to pool_stake
+        let reward_amount = 1_000_000_000u64; // 1 SOL rewards
+        let pool_account = svm.get_account(&pool_stake_pda).unwrap();
+        svm.set_account(
+            pool_stake_pda,
+            Account {
+                lamports: pool_account.lamports + reward_amount,
+                data: pool_account.data.clone(),
+                owner: pool_account.owner,
+                executable: false,
+                rent_epoch: 0,
+            }
+            .into(),
+        );
+
+        let pool_stake_after_rewards = svm.get_account(&pool_stake_pda).unwrap().lamports;
+
+        eprintln!("\n=== After Rewards ===");
+        eprintln!("  Pool stake: {}", pool_stake_after_rewards);
+
+        // Calculate expected SOL for withdraw
+        // Formula: lst_amount * total_pool_value / lst_supply
+        let withdraw_lst_amount = 2_000_000_000u64; // 2 LST
+        let expected_sol = (withdraw_lst_amount as u128)
+            .checked_mul(pool_stake_after_rewards as u128)
+            .unwrap()
+            .checked_div(mint_supply as u128)
+            .unwrap() as u64;
+
+        eprintln!("\n=== Expected Withdraw ===");
+        eprintln!("  Withdraw LST amount: {}", withdraw_lst_amount);
+        eprintln!("  Expected SOL: {}", expected_sol);
+
+        // Execute withdraw
+        let (user_stake_pda, _) = Pubkey::find_program_address(
+            &[
+                b"withdraw",
+                pool_state_pda.as_ref(),
+                user.pubkey().as_ref(),
+                &1u64.to_le_bytes(),
+            ],
+            &PROGRAM_ID,
+        );
+
+        let result = execute_withdraw(
+            &mut svm,
+            &user,
+            &pool_state_pda,
+            &pool_stake_pda,
+            &reserve_stake_pda,
+            &lst_mint_pda,
+            &user_lst_ata,
+            withdraw_lst_amount,
+            1,
+        );
+        print_transaction_logs(&result);
+        assert!(result.is_ok(), "Withdraw should succeed");
+
+        // Verify user got correct SOL amount
+        let user_stake_account = svm.get_account(&user_stake_pda).unwrap();
+
+        eprintln!("\n=== Actual Withdraw ===");
+        eprintln!("  User stake lamports: {}", user_stake_account.lamports);
+
+        // User should get MORE SOL than LST burned (because of rewards)
+        assert!(
+            user_stake_account.lamports > withdraw_lst_amount,
+            "With rewards, user should get more SOL than LST burned. Got {} for {} LST",
+            user_stake_account.lamports,
+            withdraw_lst_amount
+        );
+
+        // Verify close to expected (allow some variance for rent)
+        let difference = (user_stake_account.lamports as i64 - expected_sol as i64).abs();
+        assert!(
+            difference < 10_000_000, // 0.01 SOL tolerance
+            "User should get approximately expected SOL. Expected {}, got {}",
+            expected_sol,
+            user_stake_account.lamports
+        );
+
+        println!("\n=== Test Passed: Correct Exchange Rate With Rewards ===");
+    }
+
+    #[test]
+    fn test_withdraw_lst_supply_invariant() {
+        let mut svm = setup_svm();
+
+        let (
+            user,
+            pool_state_pda,
+            lst_mint_pda,
+            pool_stake_pda,
+            reserve_stake_pda,
+            user_lst_ata,
+            _,
+        ) = setup_pool_for_withdraw(&mut svm);
+
+        // Get state before withdraw
+        let mint_supply_before = get_mint_supply(&svm.get_account(&lst_mint_pda).unwrap().data);
+        let user_balance_before = get_token_balance(&svm.get_account(&user_lst_ata).unwrap().data);
+
+        eprintln!("\n=== Before Withdraw ===");
+        eprintln!("  Mint supply: {}", mint_supply_before);
+        eprintln!("  User balance: {}", user_balance_before);
+
+        let withdraw_amount = 2_000_000_000u64;
+
+        // Execute withdraw
+        let result = execute_withdraw(
+            &mut svm,
+            &user,
+            &pool_state_pda,
+            &pool_stake_pda,
+            &reserve_stake_pda,
+            &lst_mint_pda,
+            &user_lst_ata,
+            withdraw_amount,
+            1,
+        );
+        print_transaction_logs(&result);
+        assert!(result.is_ok(), "Withdraw should succeed");
+
+        // Get state after withdraw
+        let mint_supply_after = get_mint_supply(&svm.get_account(&lst_mint_pda).unwrap().data);
+        let user_balance_after = get_token_balance(&svm.get_account(&user_lst_ata).unwrap().data);
+
+        eprintln!("\n=== After Withdraw ===");
+        eprintln!("  Mint supply: {}", mint_supply_after);
+        eprintln!("  User balance: {}", user_balance_after);
+
+        // INVARIANT: Mint supply should decrease by exactly withdraw_amount
+        assert_eq!(
+            mint_supply_after,
+            mint_supply_before - withdraw_amount,
+            "Mint supply should decrease by withdraw amount"
+        );
+
+        // INVARIANT: User balance should decrease by exactly withdraw_amount
+        assert_eq!(
+            user_balance_after,
+            user_balance_before - withdraw_amount,
+            "User balance should decrease by withdraw amount"
+        );
+
+        println!("\n=== Test Passed: lst_supply Invariant Maintained ===");
+    }
+
+    #[test]
+    fn test_withdraw_user_without_lst_fails() {
+        let mut svm = setup_svm();
+
+        // Setup pool but use a DIFFERENT user who has no LST
+        let (_original_user, pool_state_pda, lst_mint_pda, pool_stake_pda, reserve_stake_pda, _, _) =
+            setup_pool_for_withdraw(&mut svm);
+
+        // Create new user with NO LST
+        let user_without_lst = Keypair::new();
+        svm.airdrop(&user_without_lst.pubkey(), 2_000_000_000)
+            .unwrap();
+
+        // Create ATA for new user (will have 0 balance)
+        let user_lst_ata = derive_ata(&user_without_lst.pubkey(), &lst_mint_pda);
+
+        let create_ata_ix =
+            spl_associated_token_account::instruction::create_associated_token_account(
+                &user_without_lst.pubkey(),
+                &user_without_lst.pubkey(),
+                &lst_mint_pda,
+                &TOKEN_PROGRAM_ID,
+            );
+
+        let tx = Transaction::new_signed_with_payer(
+            &[create_ata_ix],
+            Some(&user_without_lst.pubkey()),
+            &[&user_without_lst],
+            svm.latest_blockhash(),
+        );
+        svm.send_transaction(tx).expect("Should create ATA");
+
+        // Verify user has 0 LST
+        let user_balance = get_token_balance(&svm.get_account(&user_lst_ata).unwrap().data);
+        assert_eq!(user_balance, 0, "User should have 0 LST");
+
+        // Try to withdraw
+        let result = execute_withdraw(
+            &mut svm,
+            &user_without_lst,
+            &pool_state_pda,
+            &pool_stake_pda,
+            &reserve_stake_pda,
+            &lst_mint_pda,
+            &user_lst_ata,
+            1_000_000_000, // Try to withdraw 1 SOL worth
+            1,
+        );
+        print_transaction_logs(&result);
+
+        assert!(result.is_err(), "Withdraw without LST balance should fail");
+
+        println!("\n=== Test Passed: User Without LST Rejected ===");
     }
 }

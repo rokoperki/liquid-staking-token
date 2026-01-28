@@ -42,7 +42,7 @@ mod tests {
 
     fn derive_pool_state_pda(initializer: &Pubkey, seed: u64) -> (Pubkey, u8) {
         Pubkey::find_program_address(
-            &[b"lst_pool", initializer.as_ref(), &seed.to_le_bytes()],
+            &[b"lst_pool", &seed.to_le_bytes()],
             &PROGRAM_ID,
         )
     }
@@ -76,17 +76,9 @@ mod tests {
 
     fn create_initialize_instruction_data(
         seed: u64,
-        pool_bump: u8,
-        mint_bump: u8,
-        stake_bump: u8,
-        reserve_bump: u8,
     ) -> Vec<u8> {
         let mut data = vec![0u8]; // Discriminator for Initialize
         data.extend_from_slice(&seed.to_le_bytes());
-        data.push(pool_bump);
-        data.push(mint_bump);
-        data.push(stake_bump);
-        data.push(reserve_bump);
         data
     }
 
@@ -96,11 +88,10 @@ mod tests {
         data
     }
 
-    fn create_withdraw_instruction_data(amount: u64, nonce: u64, user_stake_bump: u8) -> Vec<u8> {
+    fn create_withdraw_instruction_data(amount: u64, nonce: u64) -> Vec<u8> {
         let mut data = vec![4u8]; // Discriminator for Withdraw (based on DISCRIMINATOR: u8 = 4)
         data.extend_from_slice(&amount.to_le_bytes());
         data.extend_from_slice(&nonce.to_le_bytes());
-        data.push(user_stake_bump);
         data
     }
 
@@ -173,19 +164,13 @@ mod tests {
         let seed = 12345u64;
 
         let (pool_state_pda, pool_bump) = derive_pool_state_pda(&initializer.pubkey(), seed);
-        let (lst_mint_pda, mint_bump) = derive_lst_mint_pda(&pool_state_pda);
+        let lst_mint = Keypair::new();
         let (stake_account_pda, stake_bump) = derive_stake_account_pda(&pool_state_pda);
         let (reserve_stake_pda, reserve_bump) = derive_reserve_stake_account_pda(&pool_state_pda);
         let initializer_lst_ata =
-            get_associated_token_address(&initializer.pubkey(), &lst_mint_pda);
+            get_associated_token_address(&initializer.pubkey(), &lst_mint.pubkey());
 
-        let instruction_data = create_initialize_instruction_data(
-            seed,
-            pool_bump,
-            mint_bump,
-            stake_bump,
-            reserve_bump,
-        );
+        let instruction_data = create_initialize_instruction_data(seed);
 
         let instruction = Instruction {
             program_id: PROGRAM_ID,
@@ -193,7 +178,7 @@ mod tests {
                 AccountMeta::new(initializer.pubkey(), true), // initializer
                 AccountMeta::new(initializer_lst_ata, false), // initializer_lst_ata
                 AccountMeta::new(pool_state_pda, false),      // pool_state
-                AccountMeta::new(lst_mint_pda, false),        // lst_mint
+                AccountMeta::new(lst_mint.pubkey(), true),    // lst_mint
                 AccountMeta::new(stake_account_pda, false),   // stake_account
                 AccountMeta::new(reserve_stake_pda, false),   // reserve_stake
                 AccountMeta::new_readonly(validator_vote, false), // validator_vote
@@ -212,7 +197,7 @@ mod tests {
         let transaction = Transaction::new_signed_with_payer(
             &[instruction],
             Some(&initializer.pubkey()),
-            &[&initializer],
+            &[&initializer, &lst_mint],
             svm.latest_blockhash(),
         );
 
@@ -229,7 +214,7 @@ mod tests {
         (
             initializer,
             pool_state_pda,
-            lst_mint_pda,
+            lst_mint.pubkey(),
             stake_account_pda,
             reserve_stake_pda,
             validator_vote,
@@ -284,7 +269,6 @@ mod tests {
                 AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
                 AccountMeta::new_readonly(TOKEN_PROGRAM_ID, false),
                 AccountMeta::new_readonly(STAKE_PROGRAM_ID, false),
-                AccountMeta::new_readonly(ATA_PROGRAM_ID, false),
             ],
             data: deposit_data,
         };
@@ -422,7 +406,7 @@ mod tests {
         );
 
         let withdraw_data =
-            create_withdraw_instruction_data(withdraw_amount, nonce, user_stake_bump);
+            create_withdraw_instruction_data(withdraw_amount, nonce);
 
         let withdraw_ix = Instruction {
             program_id: PROGRAM_ID,
@@ -544,7 +528,6 @@ mod tests {
                 AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
                 AccountMeta::new_readonly(TOKEN_PROGRAM_ID, false),
                 AccountMeta::new_readonly(STAKE_PROGRAM_ID, false),
-                AccountMeta::new_readonly(ATA_PROGRAM_ID, false),
             ],
             data: deposit_data,
         };
@@ -648,7 +631,7 @@ mod tests {
             &PROGRAM_ID,
         );
 
-        let withdraw_data = create_withdraw_instruction_data(amount, nonce, user_stake_bump);
+        let withdraw_data = create_withdraw_instruction_data(amount, nonce);
 
         let withdraw_ix = Instruction {
             program_id: PROGRAM_ID,

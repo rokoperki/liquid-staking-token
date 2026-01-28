@@ -2,6 +2,7 @@ use pinocchio::{
     account_info::AccountInfo,
     instruction::Seed,
     program_error::ProgramError,
+    pubkey::find_program_address,
     sysvars::{Sysvar, rent::Rent},
 };
 use pinocchio_token::instructions::Burn;
@@ -14,6 +15,7 @@ use crate::{
 pub struct Withdraw<'a> {
     pub accounts: WithdrawAccounts<'a>,
     pub instruction_data: WithdrawInstructionData,
+    pub user_stake_bump: u8,
 }
 
 impl<'a> TryFrom<(&[u8], &'a [AccountInfo])> for Withdraw<'a> {
@@ -26,7 +28,7 @@ impl<'a> TryFrom<(&[u8], &'a [AccountInfo])> for Withdraw<'a> {
         let pool_state_data = accounts.pool_state.try_borrow_data()?;
         let pool_state = PoolState::load(&pool_state_data)?;
 
-        if pool_state.is_initialized == false {
+        if pool_state.discriminator == 0 {
             return Err(ProgramError::UninitializedAccount);
         }
 
@@ -34,7 +36,6 @@ impl<'a> TryFrom<(&[u8], &'a [AccountInfo])> for Withdraw<'a> {
         ProgramAccount::verify(
             &[
                 Seed::from(b"lst_pool"),
-                Seed::from(pool_state.authority.as_ref()),
                 Seed::from(&seed_bytes),
             ],
             accounts.pool_state,
@@ -42,16 +43,18 @@ impl<'a> TryFrom<(&[u8], &'a [AccountInfo])> for Withdraw<'a> {
         )?;
 
         let nonce_bytes = instruction_data.nonce.to_le_bytes();
-        ProgramAccount::verify(
+        let (user_stake_pda, user_stake_bump) = find_program_address(
             &[
-                Seed::from(b"withdraw"),
-                Seed::from(accounts.pool_state.key().as_ref()),
-                Seed::from(accounts.user.key().as_ref()),
-                Seed::from(&nonce_bytes),
+                b"withdraw",
+                accounts.pool_state.key().as_ref(),
+                accounts.user.key().as_ref(),
+                &nonce_bytes,
             ],
-            accounts.user_stake,
-            instruction_data.user_stake_bump,
-        )?;
+            &crate::ID,
+        );
+        if accounts.user_stake.key() != &user_stake_pda {
+            return Err(ProgramError::InvalidSeeds);
+        }
 
         if accounts.user_stake.data_len() != 0 || accounts.user_stake.lamports() != 0 {
             return Err(ProgramError::AccountAlreadyInitialized);
@@ -83,6 +86,7 @@ impl<'a> TryFrom<(&[u8], &'a [AccountInfo])> for Withdraw<'a> {
         Ok(Self {
             accounts,
             instruction_data,
+            user_stake_bump,
         })
     }
 }
@@ -104,7 +108,6 @@ impl<'a> Withdraw<'a> {
         let pool_bump_binding = [pool_state.bump];
         let pool_seeds = [
             Seed::from(b"lst_pool"),
-            Seed::from(pool_state.authority.as_ref()),
             Seed::from(&seed_bytes),
             Seed::from(&pool_bump_binding),
         ];
@@ -128,7 +131,7 @@ impl<'a> Withdraw<'a> {
         }
 
         let nonce_bytes = self.instruction_data.nonce.to_le_bytes();
-        let user_stake_bump_binding = [self.instruction_data.user_stake_bump];
+        let user_stake_bump_binding = [self.user_stake_bump];
         let user_stake_seeds = [
             Seed::from(b"withdraw"),
             Seed::from(self.accounts.pool_state.key().as_ref()),

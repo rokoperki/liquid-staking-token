@@ -1,6 +1,6 @@
 use pinocchio::{account_info::AccountInfo, program_error::ProgramError};
 
-use crate::{PoolState, ProgramAccount, STAKE_PROGRAM_ID, SignerAccount};
+use crate::{ProgramAccount, STAKE_PROGRAM_ID, SignerAccount};
 
 pub struct WithdrawCompleteAccounts<'a> {
     pub user: &'a AccountInfo,
@@ -28,7 +28,7 @@ impl<'a> TryFrom<&'a [AccountInfo]> for WithdrawCompleteAccounts<'a> {
         };
 
         SignerAccount::check(user)?;
-        ProgramAccount::check::<PoolState>(pool_state)?;
+        ProgramAccount::check(pool_state)?;
 
         if stake_program.key() != &STAKE_PROGRAM_ID {
             return Err(ProgramError::IncorrectProgramId);

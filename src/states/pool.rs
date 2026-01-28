@@ -1,6 +1,6 @@
 use pinocchio::{program_error::ProgramError, pubkey::Pubkey};
 
-#[repr(C, packed)]
+#[repr(C)]
 pub struct PoolState {
     pub discriminator: u8,
     pub lst_mint: Pubkey,
@@ -8,25 +8,17 @@ pub struct PoolState {
     pub validator_vote: Pubkey,
     pub stake_account: Pubkey,
     pub reserve_stake: Pubkey,
+    _padding_1: [u8; 7],
     pub seed: u64,
     pub bump: u8,
     pub stake_bump: u8,
-    pub mint_bump: u8,
     pub reserve_bump: u8,
+    _padding_2: [u8; 5],
     pub lst_supply: u64,
-    pub is_initialized: bool,
-}
-
-use crate::Discriminator;
-
-impl Discriminator for PoolState {
-    const LEN: usize = Self::LEN;
-    const DISCRIMINATOR: u8 = Self::DISCRIMINATOR;
 }
 
 impl PoolState {
     pub const LEN: usize = size_of::<Self>();
-    pub const DISCRIMINATOR: u8 = 0;
 
     #[inline(always)]
     pub fn load_mut(bytes: &mut [u8]) -> Result<&mut Self, ProgramError> {
@@ -91,11 +83,6 @@ impl PoolState {
     }
 
     #[inline(always)]
-    pub fn mint_bump(&self) -> u8 {
-        self.mint_bump
-    }
-
-    #[inline(always)]
     pub fn reserve_bump(&self) -> u8 {
         self.reserve_bump
     }
@@ -105,13 +92,9 @@ impl PoolState {
     }
 
     #[inline(always)]
-    pub fn is_initialized(&self) -> bool {
-        self.is_initialized
-    }
-
-    #[inline(always)]
     pub fn set_inner(
         &mut self,
+        discriminator: u8,
         lst_mint: Pubkey,
         authority: Pubkey,
         validator_vote: Pubkey,
@@ -120,23 +103,21 @@ impl PoolState {
         seed: u64,
         bump: u8,
         stake_bump: u8,
-        mint_bump: u8,
         reserve_bump: u8,
         lst_supply: u64,
-        is_initialized: bool,
     ) {
-        self.discriminator = Self::DISCRIMINATOR;
+        self.discriminator = discriminator;
         self.lst_mint = lst_mint;
         self.authority = authority;
         self.validator_vote = validator_vote;
         self.stake_account = stake_account;
         self.reserve_stake = reserve_stake;
+        self._padding_1 = [0u8; 7];
         self.seed = seed;
         self.bump = bump;
         self.stake_bump = stake_bump;
-        self.mint_bump = mint_bump;
         self.reserve_bump = reserve_bump;
+        self._padding_2 = [0u8; 5];
         self.lst_supply = lst_supply;
-        self.is_initialized = is_initialized;
     }
 }

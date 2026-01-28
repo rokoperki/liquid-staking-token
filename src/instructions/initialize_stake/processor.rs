@@ -4,6 +4,7 @@ use pinocchio::{
     instruction::{Seed, Signer},
     msg,
     program_error::ProgramError,
+    pubkey::find_program_address,
     sysvars::{Sysvar, rent::Rent},
 };
 use pinocchio_system::instructions::CreateAccount;
@@ -18,6 +19,9 @@ use crate::{
 pub struct Initialize<'a> {
     pub accounts: InitializeAccounts<'a>,
     pub data: InitializeData,
+    pub pool_bump: u8,
+    pub stake_bump: u8,
+    pub reserve_bump: u8,
 }
 
 impl<'a> TryFrom<(&[u8], &'a [AccountInfo])> for Initialize<'a> {
@@ -29,44 +33,32 @@ impl<'a> TryFrom<(&[u8], &'a [AccountInfo])> for Initialize<'a> {
 
         let seed_bytes = data.seed.to_le_bytes();
 
-        ProgramAccount::verify(
-            &[
-                Seed::from(b"lst_pool"),
-                Seed::from(accounts.initializer.key().as_ref()),
-                Seed::from(&seed_bytes),
-            ],
-            accounts.pool_state,
-            data.pool_bump,
-        )?;
+        let (pool_pda, pool_bump) = find_program_address(&[b"lst_pool", &seed_bytes], &crate::ID);
+        if accounts.pool_state.key() != &pool_pda {
+            return Err(ProgramError::InvalidSeeds);
+        }
 
-        ProgramAccount::verify(
-            &[
-                Seed::from(b"lst_mint"),
-                Seed::from(accounts.pool_state.key().as_ref()),
-            ],
-            accounts.lst_mint,
-            data.mint_bump,
-        )?;
+        let (stake_pda, stake_bump) =
+            find_program_address(&[b"stake", accounts.pool_state.key().as_ref()], &crate::ID);
+        if accounts.stake_account.key() != &stake_pda {
+            return Err(ProgramError::InvalidSeeds);
+        }
 
-        ProgramAccount::verify(
-            &[
-                Seed::from(b"stake"),
-                Seed::from(accounts.pool_state.key().as_ref()),
-            ],
-            accounts.stake_account,
-            data.stake_bump,
-        )?;
+        let (reserve_pda, reserve_bump) = find_program_address(
+            &[b"reserve_stake", accounts.pool_state.key().as_ref()],
+            &crate::ID,
+        );
+        if accounts.reserve_stake.key() != &reserve_pda {
+            return Err(ProgramError::InvalidSeeds);
+        }
 
-        ProgramAccount::verify(
-            &[
-                Seed::from(b"reserve_stake"),
-                Seed::from(accounts.pool_state.key().as_ref()),
-            ],
-            accounts.reserve_stake,
-            data.reserve_bump,
-        )?;
-
-        Ok(Self { accounts, data })
+        Ok(Self {
+            accounts,
+            data,
+            pool_bump,
+            stake_bump,
+            reserve_bump,
+        })
     }
 }
 
@@ -75,14 +67,12 @@ impl<'a> Initialize<'a> {
 
     pub fn process(&self) -> ProgramResult {
         let seed_bytes = self.data.seed.to_le_bytes();
-        let pool_bump = [self.data.pool_bump];
-        let mint_bump = [self.data.mint_bump];
-        let stake_bump = [self.data.stake_bump];
-        let reserve_bump = [self.data.reserve_bump];
+        let pool_bump = [self.pool_bump];
+        let stake_bump = [self.stake_bump];
+        let reserve_bump = [self.reserve_bump];
 
         let pool_seeds = [
             Seed::from(b"lst_pool"),
-            Seed::from(self.accounts.initializer.key().as_ref()),
             Seed::from(&seed_bytes),
             Seed::from(&pool_bump),
         ];
@@ -100,9 +90,9 @@ impl<'a> Initialize<'a> {
         ];
 
         self.create_pool_state(&pool_seeds)?;
-        self.create_lst_mint(&mint_bump)?;
+        self.create_lst_mint()?;
 
-        AssociatedToken::init_if_needed(
+        AssociatedToken::init(
             self.accounts.initializer_lst_ata,
             self.accounts.lst_mint,
             self.accounts.initializer,
@@ -152,7 +142,7 @@ impl<'a> Initialize<'a> {
 
         MintTo {
             mint: self.accounts.lst_mint,
-            account: self.accounts.initializer_lst_ata, // Need to add this account
+            account: self.accounts.initializer_lst_ata,
             mint_authority: self.accounts.pool_state,
             amount: MIN_STAKE_DELEGATION,
         }
@@ -172,31 +162,24 @@ impl<'a> Initialize<'a> {
         let mut data = self.accounts.pool_state.try_borrow_mut_data()?;
         let pool = PoolState::load_mut(&mut data)?;
         pool.set_inner(
+            1,
             *self.accounts.lst_mint.key(),
             *self.accounts.initializer.key(),
             *self.accounts.validator_vote.key(),
             *self.accounts.stake_account.key(),
             *self.accounts.reserve_stake.key(),
             self.data.seed,
-            self.data.pool_bump,
-            self.data.stake_bump,
-            self.data.mint_bump,
-            self.data.reserve_bump,
+            self.pool_bump,
+            self.stake_bump,
+            self.reserve_bump,
             MIN_STAKE_DELEGATION,
-            true,
         );
 
         msg!("Pool state initialized");
         Ok(())
     }
 
-    fn create_lst_mint(&self, bump: &[u8]) -> ProgramResult {
-        let seeds = [
-            Seed::from(b"lst_mint"),
-            Seed::from(self.accounts.pool_state.key().as_ref()),
-            Seed::from(bump),
-        ];
-        let signer = [Signer::from(&seeds[..])];
+    fn create_lst_mint(&self) -> ProgramResult {
         let rent = Rent::get()?;
 
         CreateAccount {
@@ -206,7 +189,7 @@ impl<'a> Initialize<'a> {
             space: pinocchio_token::state::Mint::LEN as u64,
             owner: &pinocchio_token::ID,
         }
-        .invoke_signed(&signer)?;
+        .invoke()?;
 
         InitializeMint2 {
             mint: self.accounts.lst_mint,

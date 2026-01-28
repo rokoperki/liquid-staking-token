@@ -1,6 +1,6 @@
 use pinocchio::{account_info::AccountInfo, program_error::ProgramError};
 
-use crate::{AssociatedToken, Mint, PoolState, ProgramAccount, STAKE_PROGRAM_ID, SignerAccount};
+use crate::{AssociatedToken, Mint, ProgramAccount, STAKE_PROGRAM_ID, SignerAccount};
 
 pub struct DepositAccounts<'a> {
     pub depositor: &'a AccountInfo,
@@ -13,7 +13,6 @@ pub struct DepositAccounts<'a> {
     pub system_program: &'a AccountInfo,
     pub token_program: &'a AccountInfo,
     pub stake_program: &'a AccountInfo,
-    pub ata_program: &'a AccountInfo,
 }
 
 impl<'a> TryFrom<&'a [AccountInfo]> for DepositAccounts<'a> {
@@ -30,7 +29,6 @@ impl<'a> TryFrom<&'a [AccountInfo]> for DepositAccounts<'a> {
             system_program,
             token_program,
             stake_program,
-            ata_program,
         ] = account_infos
         else {
             return Err(ProgramError::NotEnoughAccountKeys);
@@ -39,16 +37,14 @@ impl<'a> TryFrom<&'a [AccountInfo]> for DepositAccounts<'a> {
         SignerAccount::check(depositor)?;
         ProgramAccount::check_system_program(system_program)?;
         ProgramAccount::check_token_program(token_program)?;
-        ProgramAccount::check_ata_program(ata_program)?;
-        ProgramAccount::check::<PoolState>(pool_state)?;
+        ProgramAccount::check(pool_state)?;
         Mint::check(lst_mint)?;
-        AssociatedToken::init_if_needed(
+
+        AssociatedToken::check(
             depositor_lst_ata,
-            lst_mint,
-            depositor,
-            depositor,
-            system_program,
-            token_program,
+            *depositor.key(),
+            *lst_mint.key(),
+            *token_program.key(),
         )?;
 
         if stake_program.key() != &STAKE_PROGRAM_ID {
@@ -65,7 +61,6 @@ impl<'a> TryFrom<&'a [AccountInfo]> for DepositAccounts<'a> {
             system_program,
             token_program,
             stake_program,
-            ata_program,
         })
     }
 }

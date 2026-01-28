@@ -49,6 +49,7 @@ impl<'a> TryFrom<&'a [AccountInfo]> for InitializeAccounts<'a> {
         };
 
         SignerAccount::check(initializer)?;
+        SignerAccount::check(lst_mint)?;
         ProgramAccount::check_system_program(system_program)?;
         ProgramAccount::check_token_program(token_program)?;
         ProgramAccount::check_ata_program(ata_program)?;
@@ -76,7 +77,7 @@ impl<'a> TryFrom<&'a [AccountInfo]> for InitializeAccounts<'a> {
             system_program,
             token_program,
             stake_program,
-            ata_program,
+            ata_program
         })
     }
 }

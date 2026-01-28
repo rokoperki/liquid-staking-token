@@ -1,15 +1,15 @@
 use pinocchio::{
+    ProgramResult,
     account_info::AccountInfo,
     instruction::{Seed, Signer},
     program_error::ProgramError,
-    pubkey::{find_program_address, Pubkey},
-    sysvars::{rent::Rent, Sysvar},
-    ProgramResult,
+    pubkey::{Pubkey, find_program_address},
+    sysvars::{Sysvar, rent::Rent},
 };
 use pinocchio_associated_token_account::instructions::Create;
 use pinocchio_system::instructions::CreateAccount;
 
-use crate::PinocchioError;
+use crate::{PinocchioError, PoolState};
 
 pub struct SignerAccount;
 
@@ -55,24 +55,14 @@ impl ProgramAccount {
     }
 }
 
-pub trait Discriminator {
-    const LEN: usize;
-    const DISCRIMINATOR: u8;
-}
-
 impl ProgramAccount {
-    pub fn check<T: Discriminator>(account: &AccountInfo) -> Result<(), ProgramError> {
+    pub fn check(account: &AccountInfo) -> Result<(), ProgramError> {
         if !account.is_owned_by(&crate::ID) {
             return Err(PinocchioError::InvalidOwner.into());
         }
 
-        if account.data_len() != T::LEN {
+        if account.data_len() != PoolState::LEN {
             return Err(PinocchioError::InvalidAccountData.into());
-        }
-
-        let data = account.try_borrow_data()?;
-        if data[0] != T::DISCRIMINATOR {
-            return Err(PinocchioError::InvalidDiscriminator.into());
         }
 
         Ok(())
@@ -174,10 +164,6 @@ impl AssociatedToken {
             return Err(PinocchioError::InvalidAccountData.into());
         }
 
-        if account.lamports() == 0 {
-            return Err(PinocchioError::UninitializedAccount.into());
-        }
-
         Ok(())
     }
 
@@ -198,19 +184,5 @@ impl AssociatedToken {
             token_program,
         }
         .invoke()
-    }
-
-    pub fn init_if_needed(
-        account: &AccountInfo,
-        mint: &AccountInfo,
-        payer: &AccountInfo,
-        owner: &AccountInfo,
-        system_program: &AccountInfo,
-        token_program: &AccountInfo,
-    ) -> ProgramResult {
-        match Self::check(account, *payer.key(), *mint.key(), *token_program.key()) {
-            Ok(_) => Ok(()),
-            Err(_) => Self::init(account, mint, payer, owner, system_program, token_program),
-        }
     }
 }

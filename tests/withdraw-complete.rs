@@ -42,7 +42,7 @@ mod tests {
 
     fn derive_pool_state_pda(initializer: &Pubkey, seed: u64) -> (Pubkey, u8) {
         Pubkey::find_program_address(
-            &[b"lst_pool", initializer.as_ref(), &seed.to_le_bytes()],
+            &[b"lst_pool", &seed.to_le_bytes()],
             &PROGRAM_ID,
         )
     }
@@ -74,19 +74,9 @@ mod tests {
         .0
     }
 
-    fn create_initialize_instruction_data(
-        seed: u64,
-        pool_bump: u8,
-        mint_bump: u8,
-        stake_bump: u8,
-        reserve_bump: u8,
-    ) -> Vec<u8> {
+    fn create_initialize_instruction_data(seed: u64) -> Vec<u8> {
         let mut data = vec![0u8]; // Discriminator for Initialize
         data.extend_from_slice(&seed.to_le_bytes());
-        data.push(pool_bump);
-        data.push(mint_bump);
-        data.push(stake_bump);
-        data.push(reserve_bump);
         data
     }
 
@@ -96,11 +86,10 @@ mod tests {
         data
     }
 
-    fn create_withdraw_instruction_data(amount: u64, nonce: u64, user_stake_bump: u8) -> Vec<u8> {
+    fn create_withdraw_instruction_data(amount: u64, nonce: u64) -> Vec<u8> {
         let mut data = vec![4u8]; // Discriminator for Withdraw (based on DISCRIMINATOR: u8 = 4)
         data.extend_from_slice(&amount.to_le_bytes());
         data.extend_from_slice(&nonce.to_le_bytes());
-        data.push(user_stake_bump);
         data
     }
 
@@ -173,19 +162,13 @@ mod tests {
         let seed = 12345u64;
 
         let (pool_state_pda, pool_bump) = derive_pool_state_pda(&initializer.pubkey(), seed);
-        let (lst_mint_pda, mint_bump) = derive_lst_mint_pda(&pool_state_pda);
+        let lst_mint = Keypair::new();
         let (stake_account_pda, stake_bump) = derive_stake_account_pda(&pool_state_pda);
         let (reserve_stake_pda, reserve_bump) = derive_reserve_stake_account_pda(&pool_state_pda);
         let initializer_lst_ata =
-            get_associated_token_address(&initializer.pubkey(), &lst_mint_pda);
+            get_associated_token_address(&initializer.pubkey(), &lst_mint.pubkey());
 
-        let instruction_data = create_initialize_instruction_data(
-            seed,
-            pool_bump,
-            mint_bump,
-            stake_bump,
-            reserve_bump,
-        );
+        let instruction_data = create_initialize_instruction_data(seed);
 
         let instruction = Instruction {
             program_id: PROGRAM_ID,
@@ -193,7 +176,7 @@ mod tests {
                 AccountMeta::new(initializer.pubkey(), true), // initializer
                 AccountMeta::new(initializer_lst_ata, false), // initializer_lst_ata
                 AccountMeta::new(pool_state_pda, false),      // pool_state
-                AccountMeta::new(lst_mint_pda, false),        // lst_mint
+                AccountMeta::new(lst_mint.pubkey(), true),    // lst_mint
                 AccountMeta::new(stake_account_pda, false),   // stake_account
                 AccountMeta::new(reserve_stake_pda, false),   // reserve_stake
                 AccountMeta::new_readonly(validator_vote, false), // validator_vote
@@ -212,7 +195,7 @@ mod tests {
         let transaction = Transaction::new_signed_with_payer(
             &[instruction],
             Some(&initializer.pubkey()),
-            &[&initializer],
+            &[&initializer, &lst_mint],
             svm.latest_blockhash(),
         );
 
@@ -229,7 +212,7 @@ mod tests {
         (
             initializer,
             pool_state_pda,
-            lst_mint_pda,
+            lst_mint.pubkey(),
             stake_account_pda,
             reserve_stake_pda,
             validator_vote,
@@ -237,10 +220,9 @@ mod tests {
         )
     }
 
-    fn create_withdraw_complete_instruction_data(nonce: u64, user_stake_bump: u8) -> Vec<u8> {
+    fn create_withdraw_complete_instruction_data(nonce: u64) -> Vec<u8> {
         let mut data = vec![5u8]; // Discriminator for WithdrawComplete
         data.extend_from_slice(&nonce.to_le_bytes());
-        data.push(user_stake_bump);
         data
     }
 
@@ -291,7 +273,6 @@ mod tests {
                 AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
                 AccountMeta::new_readonly(TOKEN_PROGRAM_ID, false),
                 AccountMeta::new_readonly(STAKE_PROGRAM_ID, false),
-                AccountMeta::new_readonly(ATA_PROGRAM_ID, false),
             ],
             data: deposit_data,
         };
@@ -383,7 +364,7 @@ mod tests {
         );
 
         let withdraw_data =
-            create_withdraw_instruction_data(withdraw_amount, nonce, user_stake_bump);
+            create_withdraw_instruction_data(withdraw_amount, nonce);
 
         let withdraw_ix = Instruction {
             program_id: PROGRAM_ID,
@@ -434,7 +415,7 @@ mod tests {
 
         // Call WithdrawComplete (claim)
         let withdraw_complete_data =
-            create_withdraw_complete_instruction_data(nonce, user_stake_bump);
+            create_withdraw_complete_instruction_data(nonce);
 
         let withdraw_complete_ix = Instruction {
             program_id: PROGRAM_ID,
@@ -490,551 +471,513 @@ mod tests {
     }
 
     /// Helper to setup pool with withdraw initiated (stake in cooldown)
-fn setup_pool_with_pending_withdraw(
-    svm: &mut LiteSVM,
-) -> (
-    Keypair,          // user
-    Pubkey,           // pool_state_pda
-    Pubkey,           // lst_mint_pda
-    Pubkey,           // pool_stake_pda
-    Pubkey,           // reserve_stake_pda
-    Pubkey,           // user_stake_pda
-    u8,               // user_stake_bump
-    u64,              // nonce
-    Pubkey,           // validator_vote
-) {
-    // Initialize pool
-    let (_, pool_state_pda, lst_mint_pda, pool_stake_pda, reserve_stake_pda, validator_vote, _) =
-        initialize_pool(svm);
+    fn setup_pool_with_pending_withdraw(
+        svm: &mut LiteSVM,
+    ) -> (
+        Keypair, // user
+        Pubkey,  // pool_state_pda
+        Pubkey,  // lst_mint_pda
+        Pubkey,  // pool_stake_pda
+        Pubkey,  // reserve_stake_pda
+        Pubkey,  // user_stake_pda
+        u8,      // user_stake_bump
+        u64,     // nonce
+        Pubkey,  // validator_vote
+    ) {
+        // Initialize pool
+        let (_, pool_state_pda, lst_mint_pda, pool_stake_pda, reserve_stake_pda, validator_vote, _) =
+            initialize_pool(svm);
 
-    // Create user and deposit
-    let user = Keypair::new();
-    let deposit_amount = 10_000_000_000u64; // 10 SOL
-    svm.airdrop(&user.pubkey(), 20_000_000_000).unwrap();
+        // Create user and deposit
+        let user = Keypair::new();
+        let deposit_amount = 10_000_000_000u64; // 10 SOL
+        svm.airdrop(&user.pubkey(), 20_000_000_000).unwrap();
 
-    // Create user's LST ATA
-    let user_lst_ata = derive_ata(&user.pubkey(), &lst_mint_pda);
+        // Create user's LST ATA
+        let user_lst_ata = derive_ata(&user.pubkey(), &lst_mint_pda);
 
-    let create_ata_ix =
-        spl_associated_token_account::instruction::create_associated_token_account(
-            &user.pubkey(),
-            &user.pubkey(),
-            &lst_mint_pda,
-            &TOKEN_PROGRAM_ID,
+        let create_ata_ix =
+            spl_associated_token_account::instruction::create_associated_token_account(
+                &user.pubkey(),
+                &user.pubkey(),
+                &lst_mint_pda,
+                &TOKEN_PROGRAM_ID,
+            );
+
+        let tx = Transaction::new_signed_with_payer(
+            &[create_ata_ix],
+            Some(&user.pubkey()),
+            &[&user],
+            svm.latest_blockhash(),
+        );
+        svm.send_transaction(tx).expect("Should create ATA");
+
+        // Deposit
+        let deposit_data = create_deposit_instruction_data(deposit_amount);
+
+        let deposit_ix = Instruction {
+            program_id: PROGRAM_ID,
+            accounts: vec![
+                AccountMeta::new(user.pubkey(), true),
+                AccountMeta::new(pool_state_pda, false),
+                AccountMeta::new_readonly(pool_stake_pda, false),
+                AccountMeta::new(reserve_stake_pda, false),
+                AccountMeta::new(lst_mint_pda, false),
+                AccountMeta::new(user_lst_ata, false),
+                AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
+                AccountMeta::new_readonly(TOKEN_PROGRAM_ID, false),
+                AccountMeta::new_readonly(STAKE_PROGRAM_ID, false),
+            ],
+            data: deposit_data,
+        };
+
+        let tx = Transaction::new_signed_with_payer(
+            &[deposit_ix],
+            Some(&user.pubkey()),
+            &[&user],
+            svm.latest_blockhash(),
+        );
+        svm.send_transaction(tx).expect("Deposit should succeed");
+
+        // Initialize reserve
+        let crank = Keypair::new();
+        svm.airdrop(&crank.pubkey(), 1_000_000_000).unwrap();
+
+        let init_reserve_ix = Instruction {
+            program_id: PROGRAM_ID,
+            accounts: vec![
+                AccountMeta::new(pool_state_pda, false),
+                AccountMeta::new_readonly(pool_stake_pda, false),
+                AccountMeta::new(reserve_stake_pda, false),
+                AccountMeta::new_readonly(validator_vote, false),
+                AccountMeta::new_readonly(CLOCK_SYSVAR.into(), false),
+                AccountMeta::new_readonly(RENT_SYSVAR.into(), false),
+                AccountMeta::new_readonly(STAKE_HISTORY_SYSVAR, false),
+                AccountMeta::new_readonly(STAKE_CONFIG, false),
+                AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
+                AccountMeta::new_readonly(STAKE_PROGRAM_ID, false),
+            ],
+            data: vec![2u8],
+        };
+
+        let tx = Transaction::new_signed_with_payer(
+            &[init_reserve_ix],
+            Some(&crank.pubkey()),
+            &[&crank],
+            svm.latest_blockhash(),
+        );
+        svm.send_transaction(tx)
+            .expect("InitializeReserve should succeed");
+
+        // Warp to activate stakes
+        let slots_per_epoch = 432_000;
+        svm.warp_to_slot(slots_per_epoch * 2);
+
+        // Merge reserve
+        let merge_ix = Instruction {
+            program_id: PROGRAM_ID,
+            accounts: vec![
+                AccountMeta::new(pool_state_pda, false),
+                AccountMeta::new(pool_stake_pda, false),
+                AccountMeta::new(reserve_stake_pda, false),
+                AccountMeta::new_readonly(CLOCK_SYSVAR.into(), false),
+                AccountMeta::new_readonly(STAKE_HISTORY_SYSVAR, false),
+                AccountMeta::new_readonly(STAKE_PROGRAM_ID, false),
+            ],
+            data: vec![3u8],
+        };
+
+        let tx = Transaction::new_signed_with_payer(
+            &[merge_ix],
+            Some(&crank.pubkey()),
+            &[&crank],
+            svm.latest_blockhash(),
+        );
+        svm.send_transaction(tx)
+            .expect("MergeReserve should succeed");
+
+        // Withdraw (starts cooldown)
+        let withdraw_amount = 3_000_000_000u64; // 3 SOL
+        let nonce = 1u64;
+
+        let (user_stake_pda, user_stake_bump) = Pubkey::find_program_address(
+            &[
+                b"withdraw",
+                pool_state_pda.as_ref(),
+                user.pubkey().as_ref(),
+                &nonce.to_le_bytes(),
+            ],
+            &PROGRAM_ID,
         );
 
-    let tx = Transaction::new_signed_with_payer(
-        &[create_ata_ix],
-        Some(&user.pubkey()),
-        &[&user],
-        svm.latest_blockhash(),
-    );
-    svm.send_transaction(tx).expect("Should create ATA");
+        let withdraw_data =
+            create_withdraw_instruction_data(withdraw_amount, nonce);
 
-    // Deposit
-    let deposit_data = create_deposit_instruction_data(deposit_amount);
+        let withdraw_ix = Instruction {
+            program_id: PROGRAM_ID,
+            accounts: vec![
+                AccountMeta::new(user.pubkey(), true),
+                AccountMeta::new(pool_state_pda, false),
+                AccountMeta::new(pool_stake_pda, false),
+                AccountMeta::new_readonly(reserve_stake_pda, false),
+                AccountMeta::new(user_stake_pda, false),
+                AccountMeta::new(lst_mint_pda, false),
+                AccountMeta::new(user_lst_ata, false),
+                AccountMeta::new_readonly(CLOCK_SYSVAR.into(), false),
+                AccountMeta::new_readonly(RENT_SYSVAR.into(), false),
+                AccountMeta::new_readonly(STAKE_HISTORY_SYSVAR, false),
+                AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
+                AccountMeta::new_readonly(STAKE_PROGRAM_ID, false),
+                AccountMeta::new_readonly(TOKEN_PROGRAM_ID, false),
+            ],
+            data: withdraw_data,
+        };
 
-    let deposit_ix = Instruction {
-        program_id: PROGRAM_ID,
-        accounts: vec![
-            AccountMeta::new(user.pubkey(), true),
-            AccountMeta::new(pool_state_pda, false),
-            AccountMeta::new_readonly(pool_stake_pda, false),
-            AccountMeta::new(reserve_stake_pda, false),
-            AccountMeta::new(lst_mint_pda, false),
-            AccountMeta::new(user_lst_ata, false),
-            AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
-            AccountMeta::new_readonly(TOKEN_PROGRAM_ID, false),
-            AccountMeta::new_readonly(STAKE_PROGRAM_ID, false),
-            AccountMeta::new_readonly(ATA_PROGRAM_ID, false),
-        ],
-        data: deposit_data,
-    };
+        let tx = Transaction::new_signed_with_payer(
+            &[withdraw_ix],
+            Some(&user.pubkey()),
+            &[&user],
+            svm.latest_blockhash(),
+        );
+        svm.send_transaction(tx).expect("Withdraw should succeed");
 
-    let tx = Transaction::new_signed_with_payer(
-        &[deposit_ix],
-        Some(&user.pubkey()),
-        &[&user],
-        svm.latest_blockhash(),
-    );
-    svm.send_transaction(tx).expect("Deposit should succeed");
+        (
+            user,
+            pool_state_pda,
+            lst_mint_pda,
+            pool_stake_pda,
+            reserve_stake_pda,
+            user_stake_pda,
+            user_stake_bump,
+            nonce,
+            validator_vote,
+        )
+    }
 
-    // Initialize reserve
-    let crank = Keypair::new();
-    svm.airdrop(&crank.pubkey(), 1_000_000_000).unwrap();
+    /// Helper to execute withdraw complete
+    fn execute_withdraw_complete(
+        svm: &mut LiteSVM,
+        user: &Keypair,
+        pool_state_pda: &Pubkey,
+        user_stake_pda: &Pubkey,
+        nonce: u64,
+        user_stake_bump: u8,
+    ) -> Result<litesvm::types::TransactionMetadata, litesvm::types::FailedTransactionMetadata>
+    {
+        let withdraw_complete_data =
+            create_withdraw_complete_instruction_data(nonce);
 
-    let init_reserve_ix = Instruction {
-        program_id: PROGRAM_ID,
-        accounts: vec![
-            AccountMeta::new(pool_state_pda, false),
-            AccountMeta::new_readonly(pool_stake_pda, false),
-            AccountMeta::new(reserve_stake_pda, false),
-            AccountMeta::new_readonly(validator_vote, false),
-            AccountMeta::new_readonly(CLOCK_SYSVAR.into(), false),
-            AccountMeta::new_readonly(RENT_SYSVAR.into(), false),
-            AccountMeta::new_readonly(STAKE_HISTORY_SYSVAR, false),
-            AccountMeta::new_readonly(STAKE_CONFIG, false),
-            AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
-            AccountMeta::new_readonly(STAKE_PROGRAM_ID, false),
-        ],
-        data: vec![2u8],
-    };
+        let withdraw_complete_ix = Instruction {
+            program_id: PROGRAM_ID,
+            accounts: vec![
+                AccountMeta::new(user.pubkey(), true),
+                AccountMeta::new_readonly(*pool_state_pda, false),
+                AccountMeta::new(*user_stake_pda, false),
+                AccountMeta::new_readonly(CLOCK_SYSVAR.into(), false),
+                AccountMeta::new_readonly(STAKE_HISTORY_SYSVAR, false),
+                AccountMeta::new_readonly(STAKE_PROGRAM_ID, false),
+            ],
+            data: withdraw_complete_data,
+        };
 
-    let tx = Transaction::new_signed_with_payer(
-        &[init_reserve_ix],
-        Some(&crank.pubkey()),
-        &[&crank],
-        svm.latest_blockhash(),
-    );
-    svm.send_transaction(tx).expect("InitializeReserve should succeed");
+        let tx = Transaction::new_signed_with_payer(
+            &[withdraw_complete_ix],
+            Some(&user.pubkey()),
+            &[&user],
+            svm.latest_blockhash(),
+        );
 
-    // Warp to activate stakes
-    let slots_per_epoch = 432_000;
-    svm.warp_to_slot(slots_per_epoch * 2);
+        svm.send_transaction(tx)
+    }
 
-    // Merge reserve
-    let merge_ix = Instruction {
-        program_id: PROGRAM_ID,
-        accounts: vec![
-            AccountMeta::new(pool_state_pda, false),
-            AccountMeta::new(pool_stake_pda, false),
-            AccountMeta::new(reserve_stake_pda, false),
-            AccountMeta::new_readonly(CLOCK_SYSVAR.into(), false),
-            AccountMeta::new_readonly(STAKE_HISTORY_SYSVAR, false),
-            AccountMeta::new_readonly(STAKE_PROGRAM_ID, false),
-        ],
-        data: vec![3u8],
-    };
+    #[test]
+    fn test_double_withdraw_complete_fails() {
+        let mut svm = setup_svm();
 
-    let tx = Transaction::new_signed_with_payer(
-        &[merge_ix],
-        Some(&crank.pubkey()),
-        &[&crank],
-        svm.latest_blockhash(),
-    );
-    svm.send_transaction(tx).expect("MergeReserve should succeed");
+        let (user, pool_state_pda, _, _, _, user_stake_pda, user_stake_bump, nonce, _) =
+            setup_pool_with_pending_withdraw(&mut svm);
 
-    // Withdraw (starts cooldown)
-    let withdraw_amount = 3_000_000_000u64; // 3 SOL
-    let nonce = 1u64;
+        // Warp forward to complete cooldown
+        let slots_per_epoch = 432_000;
+        svm.warp_to_slot(slots_per_epoch * 4);
 
-    let (user_stake_pda, user_stake_bump) = Pubkey::find_program_address(
-        &[
-            b"withdraw",
-            pool_state_pda.as_ref(),
-            user.pubkey().as_ref(),
-            &nonce.to_le_bytes(),
-        ],
-        &PROGRAM_ID,
-    );
+        // First withdraw complete should succeed
+        let result = execute_withdraw_complete(
+            &mut svm,
+            &user,
+            &pool_state_pda,
+            &user_stake_pda,
+            nonce,
+            user_stake_bump,
+        );
+        print_transaction_logs(&result);
+        assert!(result.is_ok(), "First withdraw complete should succeed");
 
-    let withdraw_data = create_withdraw_instruction_data(withdraw_amount, nonce, user_stake_bump);
-
-    let withdraw_ix = Instruction {
-        program_id: PROGRAM_ID,
-        accounts: vec![
-            AccountMeta::new(user.pubkey(), true),
-            AccountMeta::new(pool_state_pda, false),
-            AccountMeta::new(pool_stake_pda, false),
-            AccountMeta::new_readonly(reserve_stake_pda, false),
-            AccountMeta::new(user_stake_pda, false),
-            AccountMeta::new(lst_mint_pda, false),
-            AccountMeta::new(user_lst_ata, false),
-            AccountMeta::new_readonly(CLOCK_SYSVAR.into(), false),
-            AccountMeta::new_readonly(RENT_SYSVAR.into(), false),
-            AccountMeta::new_readonly(STAKE_HISTORY_SYSVAR, false),
-            AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
-            AccountMeta::new_readonly(STAKE_PROGRAM_ID, false),
-            AccountMeta::new_readonly(TOKEN_PROGRAM_ID, false),
-        ],
-        data: withdraw_data,
-    };
-
-    let tx = Transaction::new_signed_with_payer(
-        &[withdraw_ix],
-        Some(&user.pubkey()),
-        &[&user],
-        svm.latest_blockhash(),
-    );
-    svm.send_transaction(tx).expect("Withdraw should succeed");
-
-    (
-        user,
-        pool_state_pda,
-        lst_mint_pda,
-        pool_stake_pda,
-        reserve_stake_pda,
-        user_stake_pda,
-        user_stake_bump,
-        nonce,
-        validator_vote,
-    )
-}
-
-/// Helper to execute withdraw complete
-fn execute_withdraw_complete(
-    svm: &mut LiteSVM,
-    user: &Keypair,
-    pool_state_pda: &Pubkey,
-    user_stake_pda: &Pubkey,
-    nonce: u64,
-    user_stake_bump: u8,
-) -> Result<litesvm::types::TransactionMetadata, litesvm::types::FailedTransactionMetadata> {
-    let withdraw_complete_data = create_withdraw_complete_instruction_data(nonce, user_stake_bump);
-
-    let withdraw_complete_ix = Instruction {
-        program_id: PROGRAM_ID,
-        accounts: vec![
-            AccountMeta::new(user.pubkey(), true),
-            AccountMeta::new_readonly(*pool_state_pda, false),
-            AccountMeta::new(*user_stake_pda, false),
-            AccountMeta::new_readonly(CLOCK_SYSVAR.into(), false),
-            AccountMeta::new_readonly(STAKE_HISTORY_SYSVAR, false),
-            AccountMeta::new_readonly(STAKE_PROGRAM_ID, false),
-        ],
-        data: withdraw_complete_data,
-    };
-
-    let tx = Transaction::new_signed_with_payer(
-        &[withdraw_complete_ix],
-        Some(&user.pubkey()),
-        &[&user],
-        svm.latest_blockhash(),
-    );
-
-    svm.send_transaction(tx)
-}
-
-#[test]
-fn test_double_withdraw_complete_fails() {
-    let mut svm = setup_svm();
-
-    let (
-        user,
-        pool_state_pda,
-        _,
-        _,
-        _,
-        user_stake_pda,
-        user_stake_bump,
-        nonce,
-        _,
-    ) = setup_pool_with_pending_withdraw(&mut svm);
-
-    // Warp forward to complete cooldown
-    let slots_per_epoch = 432_000;
-    svm.warp_to_slot(slots_per_epoch * 4);
-
-    // First withdraw complete should succeed
-    let result = execute_withdraw_complete(
-        &mut svm,
-        &user,
-        &pool_state_pda,
-        &user_stake_pda,
-        nonce,
-        user_stake_bump,
-    );
-    print_transaction_logs(&result);
-    assert!(result.is_ok(), "First withdraw complete should succeed");
-
-    // Verify user_stake is closed/empty
-    let user_stake_after = svm.get_account(&user_stake_pda);
-    match &user_stake_after {
-        Some(acc) => {
-            eprintln!("User stake after first claim: {} lamports", acc.lamports);
-            assert_eq!(acc.lamports, 0, "User stake should be empty");
+        // Verify user_stake is closed/empty
+        let user_stake_after = svm.get_account(&user_stake_pda);
+        match &user_stake_after {
+            Some(acc) => {
+                eprintln!("User stake after first claim: {} lamports", acc.lamports);
+                assert_eq!(acc.lamports, 0, "User stake should be empty");
+            }
+            None => {
+                eprintln!("User stake: CLOSED");
+            }
         }
-        None => {
-            eprintln!("User stake: CLOSED");
+
+        // Second withdraw complete should FAIL
+        let result = execute_withdraw_complete(
+            &mut svm,
+            &user,
+            &pool_state_pda,
+            &user_stake_pda,
+            nonce,
+            user_stake_bump,
+        );
+        print_transaction_logs(&result);
+
+        assert!(
+            result.is_err(),
+            "Second withdraw complete should fail - stake already claimed"
+        );
+
+        println!("\n=== Test Passed: Double Withdraw Complete Rejected ===");
+    }
+
+    #[test]
+    fn test_withdraw_complete_wrong_user_fails() {
+        let mut svm = setup_svm();
+
+        let (_original_user, pool_state_pda, _, _, _, user_stake_pda, user_stake_bump, nonce, _) =
+            setup_pool_with_pending_withdraw(&mut svm);
+
+        // Warp forward to complete cooldown
+        let slots_per_epoch = 432_000;
+        svm.warp_to_slot(slots_per_epoch * 4);
+
+        // Create attacker who tries to claim original user's stake
+        let attacker = Keypair::new();
+        svm.airdrop(&attacker.pubkey(), 1_000_000_000).unwrap();
+
+        // Attacker tries to claim with the original user's stake PDA
+        // This should fail because the PDA is derived with original user's pubkey
+        let withdraw_complete_data =
+            create_withdraw_complete_instruction_data(nonce);
+
+        let withdraw_complete_ix = Instruction {
+            program_id: PROGRAM_ID,
+            accounts: vec![
+                AccountMeta::new(attacker.pubkey(), true), // Attacker as user
+                AccountMeta::new_readonly(pool_state_pda, false),
+                AccountMeta::new(user_stake_pda, false), // Original user's stake
+                AccountMeta::new_readonly(CLOCK_SYSVAR.into(), false),
+                AccountMeta::new_readonly(STAKE_HISTORY_SYSVAR, false),
+                AccountMeta::new_readonly(STAKE_PROGRAM_ID, false),
+            ],
+            data: withdraw_complete_data,
+        };
+
+        let tx = Transaction::new_signed_with_payer(
+            &[withdraw_complete_ix],
+            Some(&attacker.pubkey()),
+            &[&attacker],
+            svm.latest_blockhash(),
+        );
+
+        let result = svm.send_transaction(tx);
+        print_transaction_logs(&result);
+
+        assert!(
+            result.is_err(),
+            "Attacker should not be able to claim another user's stake"
+        );
+
+        // Verify original stake still exists
+        let user_stake = svm.get_account(&user_stake_pda).unwrap();
+        assert!(
+            user_stake.lamports > 0,
+            "Original user's stake should still exist"
+        );
+
+        println!("\n=== Test Passed: Wrong User Claim Rejected ===");
+    }
+
+    #[test]
+    fn test_withdraw_complete_before_cooldown_fails() {
+        let mut svm = setup_svm();
+
+        let (user, pool_state_pda, _, _, _, user_stake_pda, user_stake_bump, nonce, _) =
+            setup_pool_with_pending_withdraw(&mut svm);
+
+        // DO NOT warp forward - stake is still deactivating
+
+        // Try to claim immediately (cooldown not complete)
+        let result = execute_withdraw_complete(
+            &mut svm,
+            &user,
+            &pool_state_pda,
+            &user_stake_pda,
+            nonce,
+            user_stake_bump,
+        );
+        print_transaction_logs(&result);
+
+        // This might succeed in LiteSVM but would fail on mainnet
+        // The stake program enforces cooldown period
+        // If it succeeds, it's a LiteSVM limitation, not a program bug
+        if result.is_err() {
+            println!("\n=== Test Passed: Withdraw Before Cooldown Rejected ===");
+        } else {
+            eprintln!(
+                "\nNote: LiteSVM may not enforce stake cooldown. On mainnet, this would fail."
+            );
+            println!("\n=== Test Skipped: LiteSVM doesn't enforce cooldown ===");
         }
     }
 
-    // Second withdraw complete should FAIL
-    let result = execute_withdraw_complete(
-        &mut svm,
-        &user,
-        &pool_state_pda,
-        &user_stake_pda,
-        nonce,
-        user_stake_bump,
-    );
-    print_transaction_logs(&result);
+    #[test]
+    fn test_withdraw_complete_nonexistent_stake_fails() {
+        let mut svm = setup_svm();
 
-    assert!(
-        result.is_err(),
-        "Second withdraw complete should fail - stake already claimed"
-    );
+        // Initialize pool but DON'T do a withdraw
+        let (_, pool_state_pda, _, _, _, _, _) = initialize_pool(&mut svm);
 
-    println!("\n=== Test Passed: Double Withdraw Complete Rejected ===");
-}
+        // Create user who never withdrew
+        let user = Keypair::new();
+        svm.airdrop(&user.pubkey(), 1_000_000_000).unwrap();
 
-#[test]
-fn test_withdraw_complete_wrong_user_fails() {
-    let mut svm = setup_svm();
+        let nonce = 999u64; // Random nonce that was never used
 
-    let (
-        _original_user,
-        pool_state_pda,
-        _,
-        _,
-        _,
-        user_stake_pda,
-        user_stake_bump,
-        nonce,
-        _,
-    ) = setup_pool_with_pending_withdraw(&mut svm);
+        let (user_stake_pda, user_stake_bump) = Pubkey::find_program_address(
+            &[
+                b"withdraw",
+                pool_state_pda.as_ref(),
+                user.pubkey().as_ref(),
+                &nonce.to_le_bytes(),
+            ],
+            &PROGRAM_ID,
+        );
 
-    // Warp forward to complete cooldown
-    let slots_per_epoch = 432_000;
-    svm.warp_to_slot(slots_per_epoch * 4);
+        // Try to claim non-existent stake
+        let result = execute_withdraw_complete(
+            &mut svm,
+            &user,
+            &pool_state_pda,
+            &user_stake_pda,
+            nonce,
+            user_stake_bump,
+        );
+        print_transaction_logs(&result);
 
-    // Create attacker who tries to claim original user's stake
-    let attacker = Keypair::new();
-    svm.airdrop(&attacker.pubkey(), 1_000_000_000).unwrap();
+        assert!(
+            result.is_err(),
+            "Withdraw complete for non-existent stake should fail"
+        );
 
-    // Attacker tries to claim with the original user's stake PDA
-    // This should fail because the PDA is derived with original user's pubkey
-    let withdraw_complete_data = create_withdraw_complete_instruction_data(nonce, user_stake_bump);
-
-    let withdraw_complete_ix = Instruction {
-        program_id: PROGRAM_ID,
-        accounts: vec![
-            AccountMeta::new(attacker.pubkey(), true), // Attacker as user
-            AccountMeta::new_readonly(pool_state_pda, false),
-            AccountMeta::new(user_stake_pda, false), // Original user's stake
-            AccountMeta::new_readonly(CLOCK_SYSVAR.into(), false),
-            AccountMeta::new_readonly(STAKE_HISTORY_SYSVAR, false),
-            AccountMeta::new_readonly(STAKE_PROGRAM_ID, false),
-        ],
-        data: withdraw_complete_data,
-    };
-
-    let tx = Transaction::new_signed_with_payer(
-        &[withdraw_complete_ix],
-        Some(&attacker.pubkey()),
-        &[&attacker],
-        svm.latest_blockhash(),
-    );
-
-    let result = svm.send_transaction(tx);
-    print_transaction_logs(&result);
-
-    assert!(
-        result.is_err(),
-        "Attacker should not be able to claim another user's stake"
-    );
-
-    // Verify original stake still exists
-    let user_stake = svm.get_account(&user_stake_pda).unwrap();
-    assert!(
-        user_stake.lamports > 0,
-        "Original user's stake should still exist"
-    );
-
-    println!("\n=== Test Passed: Wrong User Claim Rejected ===");
-}
-
-#[test]
-fn test_withdraw_complete_before_cooldown_fails() {
-    let mut svm = setup_svm();
-
-    let (
-        user,
-        pool_state_pda,
-        _,
-        _,
-        _,
-        user_stake_pda,
-        user_stake_bump,
-        nonce,
-        _,
-    ) = setup_pool_with_pending_withdraw(&mut svm);
-
-    // DO NOT warp forward - stake is still deactivating
-
-    // Try to claim immediately (cooldown not complete)
-    let result = execute_withdraw_complete(
-        &mut svm,
-        &user,
-        &pool_state_pda,
-        &user_stake_pda,
-        nonce,
-        user_stake_bump,
-    );
-    print_transaction_logs(&result);
-
-    // This might succeed in LiteSVM but would fail on mainnet
-    // The stake program enforces cooldown period
-    // If it succeeds, it's a LiteSVM limitation, not a program bug
-    if result.is_err() {
-        println!("\n=== Test Passed: Withdraw Before Cooldown Rejected ===");
-    } else {
-        eprintln!("\nNote: LiteSVM may not enforce stake cooldown. On mainnet, this would fail.");
-        println!("\n=== Test Skipped: LiteSVM doesn't enforce cooldown ===");
-    }
-}
-
-#[test]
-fn test_withdraw_complete_nonexistent_stake_fails() {
-    let mut svm = setup_svm();
-
-    // Initialize pool but DON'T do a withdraw
-    let (_, pool_state_pda, _, _, _, _, _) = initialize_pool(&mut svm);
-
-    // Create user who never withdrew
-    let user = Keypair::new();
-    svm.airdrop(&user.pubkey(), 1_000_000_000).unwrap();
-
-    let nonce = 999u64; // Random nonce that was never used
-
-    let (user_stake_pda, user_stake_bump) = Pubkey::find_program_address(
-        &[
-            b"withdraw",
-            pool_state_pda.as_ref(),
-            user.pubkey().as_ref(),
-            &nonce.to_le_bytes(),
-        ],
-        &PROGRAM_ID,
-    );
-
-    // Try to claim non-existent stake
-    let result = execute_withdraw_complete(
-        &mut svm,
-        &user,
-        &pool_state_pda,
-        &user_stake_pda,
-        nonce,
-        user_stake_bump,
-    );
-    print_transaction_logs(&result);
-
-    assert!(
-        result.is_err(),
-        "Withdraw complete for non-existent stake should fail"
-    );
-
-    println!("\n=== Test Passed: Non-Existent Stake Claim Rejected ===");
-}
-
-#[test]
-fn test_withdraw_complete_wrong_nonce_fails() {
-    let mut svm = setup_svm();
-
-    let (
-        user,
-        pool_state_pda,
-        _,
-        _,
-        _,
-        _user_stake_pda,
-        _user_stake_bump,
-        _correct_nonce,
-        _,
-    ) = setup_pool_with_pending_withdraw(&mut svm);
-
-    // Warp forward
-    let slots_per_epoch = 432_000;
-    svm.warp_to_slot(slots_per_epoch * 4);
-
-    // Use WRONG nonce
-    let wrong_nonce = 999u64;
-
-    let (wrong_user_stake_pda, wrong_user_stake_bump) = Pubkey::find_program_address(
-        &[
-            b"withdraw",
-            pool_state_pda.as_ref(),
-            user.pubkey().as_ref(),
-            &wrong_nonce.to_le_bytes(),
-        ],
-        &PROGRAM_ID,
-    );
-
-    // Try to claim with wrong nonce
-    let result = execute_withdraw_complete(
-        &mut svm,
-        &user,
-        &pool_state_pda,
-        &wrong_user_stake_pda,
-        wrong_nonce,
-        wrong_user_stake_bump,
-    );
-    print_transaction_logs(&result);
-
-    assert!(
-        result.is_err(),
-        "Withdraw complete with wrong nonce should fail"
-    );
-
-    println!("\n=== Test Passed: Wrong Nonce Claim Rejected ===");
-}
-
-#[test]
-fn test_withdraw_complete_user_receives_full_amount() {
-    let mut svm = setup_svm();
-
-    let (
-        user,
-        pool_state_pda,
-        _,
-        _,
-        _,
-        user_stake_pda,
-        user_stake_bump,
-        nonce,
-        _,
-    ) = setup_pool_with_pending_withdraw(&mut svm);
-
-    // Get stake lamports before claim
-    let user_stake_lamports = svm.get_account(&user_stake_pda).unwrap().lamports;
-    eprintln!("User stake lamports: {}", user_stake_lamports);
-
-    // Get user SOL before claim
-    let user_sol_before = svm.get_account(&user.pubkey()).unwrap().lamports;
-    eprintln!("User SOL before: {}", user_sol_before);
-
-    // Warp forward to complete cooldown
-    let slots_per_epoch = 432_000;
-    svm.warp_to_slot(slots_per_epoch * 4);
-
-    // Claim
-    let result = execute_withdraw_complete(
-        &mut svm,
-        &user,
-        &pool_state_pda,
-        &user_stake_pda,
-        nonce,
-        user_stake_bump,
-    );
-    print_transaction_logs(&result);
-    assert!(result.is_ok(), "Withdraw complete should succeed");
-
-    // Get user SOL after claim
-    let user_sol_after = svm.get_account(&user.pubkey()).unwrap().lamports;
-    eprintln!("User SOL after: {}", user_sol_after);
-
-    let sol_received = user_sol_after.saturating_sub(user_sol_before);
-    eprintln!("SOL received: {}", sol_received);
-
-    // User should receive all stake lamports (minus tx fee ~5000)
-    let min_expected = user_stake_lamports.saturating_sub(10_000); // Allow for tx fee
-    assert!(
-        sol_received >= min_expected,
-        "User should receive full stake amount. Expected >= {}, got {}",
-        min_expected,
-        sol_received
-    );
-
-    // Verify stake account is empty
-    let user_stake_after = svm.get_account(&user_stake_pda);
-    match user_stake_after {
-        Some(acc) => {
-            assert_eq!(acc.lamports, 0, "Stake should be empty");
-        }
-        None => {
-            // Account closed - also valid
-        }
+        println!("\n=== Test Passed: Non-Existent Stake Claim Rejected ===");
     }
 
-    println!("\n=== Test Passed: User Receives Full Amount ===");
-}
+    #[test]
+    fn test_withdraw_complete_wrong_nonce_fails() {
+        let mut svm = setup_svm();
+
+        let (user, pool_state_pda, _, _, _, _user_stake_pda, _user_stake_bump, _correct_nonce, _) =
+            setup_pool_with_pending_withdraw(&mut svm);
+
+        // Warp forward
+        let slots_per_epoch = 432_000;
+        svm.warp_to_slot(slots_per_epoch * 4);
+
+        // Use WRONG nonce
+        let wrong_nonce = 999u64;
+
+        let (wrong_user_stake_pda, wrong_user_stake_bump) = Pubkey::find_program_address(
+            &[
+                b"withdraw",
+                pool_state_pda.as_ref(),
+                user.pubkey().as_ref(),
+                &wrong_nonce.to_le_bytes(),
+            ],
+            &PROGRAM_ID,
+        );
+
+        // Try to claim with wrong nonce
+        let result = execute_withdraw_complete(
+            &mut svm,
+            &user,
+            &pool_state_pda,
+            &wrong_user_stake_pda,
+            wrong_nonce,
+            wrong_user_stake_bump,
+        );
+        print_transaction_logs(&result);
+
+        assert!(
+            result.is_err(),
+            "Withdraw complete with wrong nonce should fail"
+        );
+
+        println!("\n=== Test Passed: Wrong Nonce Claim Rejected ===");
+    }
+
+    #[test]
+    fn test_withdraw_complete_user_receives_full_amount() {
+        let mut svm = setup_svm();
+
+        let (user, pool_state_pda, _, _, _, user_stake_pda, user_stake_bump, nonce, _) =
+            setup_pool_with_pending_withdraw(&mut svm);
+
+        // Get stake lamports before claim
+        let user_stake_lamports = svm.get_account(&user_stake_pda).unwrap().lamports;
+        eprintln!("User stake lamports: {}", user_stake_lamports);
+
+        // Get user SOL before claim
+        let user_sol_before = svm.get_account(&user.pubkey()).unwrap().lamports;
+        eprintln!("User SOL before: {}", user_sol_before);
+
+        // Warp forward to complete cooldown
+        let slots_per_epoch = 432_000;
+        svm.warp_to_slot(slots_per_epoch * 4);
+
+        // Claim
+        let result = execute_withdraw_complete(
+            &mut svm,
+            &user,
+            &pool_state_pda,
+            &user_stake_pda,
+            nonce,
+            user_stake_bump,
+        );
+        print_transaction_logs(&result);
+        assert!(result.is_ok(), "Withdraw complete should succeed");
+
+        // Get user SOL after claim
+        let user_sol_after = svm.get_account(&user.pubkey()).unwrap().lamports;
+        eprintln!("User SOL after: {}", user_sol_after);
+
+        let sol_received = user_sol_after.saturating_sub(user_sol_before);
+        eprintln!("SOL received: {}", sol_received);
+
+        // User should receive all stake lamports (minus tx fee ~5000)
+        let min_expected = user_stake_lamports.saturating_sub(10_000); // Allow for tx fee
+        assert!(
+            sol_received >= min_expected,
+            "User should receive full stake amount. Expected >= {}, got {}",
+            min_expected,
+            sol_received
+        );
+
+        // Verify stake account is empty
+        let user_stake_after = svm.get_account(&user_stake_pda);
+        match user_stake_after {
+            Some(acc) => {
+                assert_eq!(acc.lamports, 0, "Stake should be empty");
+            }
+            None => {
+                // Account closed - also valid
+            }
+        }
+
+        println!("\n=== Test Passed: User Receives Full Amount ===");
+    }
 }

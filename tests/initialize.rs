@@ -50,7 +50,7 @@ mod tests {
 
     fn derive_pool_state_pda(initializer: &Pubkey, seed: u64) -> (Pubkey, u8) {
         Pubkey::find_program_address(
-            &[b"lst_pool", initializer.as_ref(), &seed.to_le_bytes()],
+            &[b"lst_pool", &seed.to_le_bytes()],
             &PROGRAM_ID,
         )
     }
@@ -67,19 +67,9 @@ mod tests {
         Pubkey::find_program_address(&[b"reserve_stake", pool_state.as_ref()], &PROGRAM_ID)
     }
 
-    fn create_initialize_instruction_data(
-        seed: u64,
-        pool_bump: u8,
-        mint_bump: u8,
-        stake_bump: u8,
-        reserve_bump: u8,
-    ) -> Vec<u8> {
+    fn create_initialize_instruction_data(seed: u64) -> Vec<u8> {
         let mut data = vec![0u8]; // Discriminator for Initialize
         data.extend_from_slice(&seed.to_le_bytes());
-        data.push(pool_bump);
-        data.push(mint_bump);
-        data.push(stake_bump);
-        data.push(reserve_bump);
         data
     }
 
@@ -161,29 +151,23 @@ mod tests {
 
         // Derive all PDAs
         let (pool_state_pda, pool_bump) = derive_pool_state_pda(&initializer.pubkey(), seed);
-        let (lst_mint_pda, mint_bump) = derive_lst_mint_pda(&pool_state_pda);
+        let lst_mint = Keypair::new();
         let (stake_account_pda, stake_bump) = derive_stake_account_pda(&pool_state_pda);
         let (reserve_stake_pda, reserve_bump) = derive_reserve_stake_account_pda(&pool_state_pda);
 
         // Derive the initializer's ATA for the LST mint
         let initializer_lst_ata =
-            get_associated_token_address(&initializer.pubkey(), &lst_mint_pda);
+            get_associated_token_address(&initializer.pubkey(), &lst_mint.pubkey());
 
-        let instruction_data = create_initialize_instruction_data(
-            seed,
-            pool_bump,
-            mint_bump,
-            stake_bump,
-            reserve_bump,
-        );
+        let instruction_data = create_initialize_instruction_data(seed);
 
         let instruction = Instruction {
             program_id: PROGRAM_ID,
             accounts: vec![
                 AccountMeta::new(initializer.pubkey(), true),
-                AccountMeta::new(initializer_lst_ata, false), // NEW: initializer's LST ATA
+                AccountMeta::new(initializer_lst_ata, false),
                 AccountMeta::new(pool_state_pda, false),
-                AccountMeta::new(lst_mint_pda, false),
+                AccountMeta::new(lst_mint.pubkey(), true),
                 AccountMeta::new(stake_account_pda, false),
                 AccountMeta::new(reserve_stake_pda, false),
                 AccountMeta::new_readonly(validator_vote, false),
@@ -202,7 +186,7 @@ mod tests {
         let transaction = Transaction::new_signed_with_payer(
             &[instruction],
             Some(&initializer.pubkey()),
-            &[&initializer],
+            &[&initializer, &lst_mint],  
             svm.latest_blockhash(),
         );
 
@@ -223,7 +207,7 @@ mod tests {
         );
 
         // Verify LST mint was created
-        let lst_mint_account = svm.get_account(&lst_mint_pda);
+        let lst_mint_account = svm.get_account(&lst_mint.pubkey());
         assert!(lst_mint_account.is_some(), "LST mint account should exist");
         let mint_account = lst_mint_account.unwrap();
         assert_eq!(
@@ -268,7 +252,7 @@ mod tests {
 
         println!("\n=== Verification Passed ===");
         println!("  Pool State: {}", pool_state_pda);
-        println!("  LST Mint: {}", lst_mint_pda);
+        println!("  LST Mint: {}", lst_mint.pubkey());
         println!("  Stake Account: {}", stake_account_pda);
         println!("  Initializer ATA: {}", initializer_lst_ata);
         println!("  Initializer LST Balance: {}", lst_balance);
@@ -290,20 +274,14 @@ mod tests {
 
         // Derive all PDAs
         let (pool_state_pda, pool_bump) = derive_pool_state_pda(&initializer.pubkey(), seed);
-        let (lst_mint_pda, mint_bump) = derive_lst_mint_pda(&pool_state_pda);
+        let lst_mint = Keypair::new();
         let (stake_account_pda, stake_bump) = derive_stake_account_pda(&pool_state_pda);
         let (reserve_stake_pda, reserve_bump) = derive_reserve_stake_account_pda(&pool_state_pda);
         let initializer_lst_ata =
-            get_associated_token_address(&initializer.pubkey(), &lst_mint_pda);
+            get_associated_token_address(&initializer.pubkey(), &lst_mint.pubkey());
 
         // ============ FIRST INITIALIZE (should succeed) ============
-        let init_instruction_data = create_initialize_instruction_data(
-            seed,
-            pool_bump,
-            mint_bump,
-            stake_bump,
-            reserve_bump,
-        );
+        let init_instruction_data = create_initialize_instruction_data(seed);
 
         let init_instruction = Instruction {
             program_id: PROGRAM_ID,
@@ -311,7 +289,7 @@ mod tests {
                 AccountMeta::new(initializer.pubkey(), true),
                 AccountMeta::new(initializer_lst_ata, false),
                 AccountMeta::new(pool_state_pda, false),
-                AccountMeta::new(lst_mint_pda, false),
+                AccountMeta::new(lst_mint.pubkey(), true),
                 AccountMeta::new(stake_account_pda, false),
                 AccountMeta::new(reserve_stake_pda, false),
                 AccountMeta::new_readonly(validator_vote, false),
@@ -330,7 +308,7 @@ mod tests {
         let init_tx = Transaction::new_signed_with_payer(
             &[init_instruction.clone()],
             Some(&initializer.pubkey()),
-            &[&initializer],
+            &[&initializer, &lst_mint],  
             svm.latest_blockhash(),
         );
 
@@ -346,7 +324,7 @@ mod tests {
         let reinit_tx = Transaction::new_signed_with_payer(
             &[init_instruction],
             Some(&initializer.pubkey()),
-            &[&initializer],
+            &[&initializer, &lst_mint],  
             svm.latest_blockhash(),
         );
 
@@ -379,11 +357,11 @@ mod tests {
 
         // Derive all PDAs
         let (pool_state_pda, pool_bump) = derive_pool_state_pda(&initializer.pubkey(), seed);
-        let (lst_mint_pda, mint_bump) = derive_lst_mint_pda(&pool_state_pda);
+        let lst_mint = Keypair::new();
         let (stake_account_pda, stake_bump) = derive_stake_account_pda(&pool_state_pda);
         let (reserve_stake_pda, reserve_bump) = derive_reserve_stake_account_pda(&pool_state_pda);
         let initializer_lst_ata =
-            get_associated_token_address(&initializer.pubkey(), &lst_mint_pda);
+            get_associated_token_address(&initializer.pubkey(), &lst_mint.pubkey());
 
         // ============ CREATE FAKE VOTE ACCOUNT ============
         // This account is NOT owned by the vote program
@@ -400,13 +378,7 @@ mod tests {
             .into(),
         );
 
-        let init_instruction_data = create_initialize_instruction_data(
-            seed,
-            pool_bump,
-            mint_bump,
-            stake_bump,
-            reserve_bump,
-        );
+        let init_instruction_data = create_initialize_instruction_data(seed);
 
         let init_instruction = Instruction {
             program_id: PROGRAM_ID,
@@ -414,10 +386,10 @@ mod tests {
                 AccountMeta::new(initializer.pubkey(), true),
                 AccountMeta::new(initializer_lst_ata, false),
                 AccountMeta::new(pool_state_pda, false),
-                AccountMeta::new(lst_mint_pda, false),
+                AccountMeta::new(lst_mint.pubkey(), true),
                 AccountMeta::new(stake_account_pda, false),
                 AccountMeta::new(reserve_stake_pda, false),
-                AccountMeta::new_readonly(fake_vote.pubkey(), false), // Fake vote account
+                AccountMeta::new_readonly(fake_vote.pubkey(), false),
                 AccountMeta::new_readonly(CLOCK_SYSVAR.into(), false),
                 AccountMeta::new_readonly(RENT_SYSVAR.into(), false),
                 AccountMeta::new_readonly(STAKE_HISTORY_SYSVAR, false),
@@ -433,7 +405,7 @@ mod tests {
         let init_tx = Transaction::new_signed_with_payer(
             &[init_instruction],
             Some(&initializer.pubkey()),
-            &[&initializer],
+            &[&initializer, &lst_mint],
             svm.latest_blockhash(),
         );
 
@@ -472,20 +444,14 @@ mod tests {
 
         // Derive all PDAs
         let (pool_state_pda, pool_bump) = derive_pool_state_pda(&initializer.pubkey(), seed);
-        let (lst_mint_pda, mint_bump) = derive_lst_mint_pda(&pool_state_pda);
+        let lst_mint = Keypair::new();
         let (stake_account_pda, stake_bump) = derive_stake_account_pda(&pool_state_pda);
         let (reserve_stake_pda, reserve_bump) = derive_reserve_stake_account_pda(&pool_state_pda);
         let initializer_lst_ata =
-            get_associated_token_address(&initializer.pubkey(), &lst_mint_pda);
+            get_associated_token_address(&initializer.pubkey(), &lst_mint.pubkey());
 
         // ============ INITIALIZE ============
-        let init_instruction_data = create_initialize_instruction_data(
-            seed,
-            pool_bump,
-            mint_bump,
-            stake_bump,
-            reserve_bump,
-        );
+        let init_instruction_data = create_initialize_instruction_data(seed);
 
         let init_instruction = Instruction {
             program_id: PROGRAM_ID,
@@ -493,7 +459,7 @@ mod tests {
                 AccountMeta::new(initializer.pubkey(), true),
                 AccountMeta::new(initializer_lst_ata, false),
                 AccountMeta::new(pool_state_pda, false),
-                AccountMeta::new(lst_mint_pda, false),
+                AccountMeta::new(lst_mint.pubkey(), true),
                 AccountMeta::new(stake_account_pda, false),
                 AccountMeta::new(reserve_stake_pda, false),
                 AccountMeta::new_readonly(validator_vote, false),
@@ -512,7 +478,7 @@ mod tests {
         let init_tx = Transaction::new_signed_with_payer(
             &[init_instruction],
             Some(&initializer.pubkey()),
-            &[&initializer],
+            &[&initializer, &lst_mint],  
             svm.latest_blockhash(),
         );
 
@@ -527,7 +493,7 @@ mod tests {
         let lst_supply_in_state = get_lst_supply_from_pool_state(&pool_state_account.data);
 
         // 2. Get mint total supply
-        let lst_mint_account = svm.get_account(&lst_mint_pda).unwrap();
+        let lst_mint_account = svm.get_account(&lst_mint.pubkey()).unwrap();
         let mint_total_supply = get_mint_supply(&lst_mint_account.data);
 
         // 3. Get authority's ATA balance
@@ -608,31 +574,39 @@ mod tests {
     }
 
     /// Helper to get lst_supply from pool state data
-/// Helper to get lst_supply from pool state data
-/// ADJUST THIS BASED ON YOUR ACTUAL POOLSTATE STRUCT LAYOUT
-fn get_lst_supply_from_pool_state(data: &[u8]) -> u64 {
-    // Your PoolState layout (guessing based on set_inner params):
-    //   discriminator: u8 (1 byte)        - offset 0
-    //   lst_mint: Pubkey (32 bytes)      - offset 1
-    //   authority: Pubkey (32 bytes)     - offset 33
-    //   validator_vote: Pubkey (32 bytes) - offset 65
-    //   stake_account: Pubkey (32 bytes)  - offset 97
-    //   reserve_stake: Pubkey (32 bytes)  - offset 129
-    //   seed: u64 (8 bytes)               - offset 161
-    //   pool_bump: u8 (1 byte)            - offset 169
-    //   stake_bump: u8 (1 byte)           - offset 170
-    //   mint_bump: u8 (1 byte)            - offset 171
-    //   reserve_bump: u8 (1 byte)         - offset 172
-    //   lst_supply: u64 (8 bytes)         - offset 173
-    //   is_initialized: bool (1 byte)     - offset 181
+    /// Helper to get lst_supply from pool state data
+    /// ADJUST THIS BASED ON YOUR ACTUAL POOLSTATE STRUCT LAYOUT
+    fn get_lst_supply_from_pool_state(data: &[u8]) -> u64 {
+        // Your PoolState layout (guessing based on set_inner params):
+        // pub discriminator: u8,        // offset 0,   size 1
+        // pub lst_mint: Pubkey,         // offset 1,   size 32
+        // pub authority: Pubkey,        // offset 33,  size 32
+        // pub validator_vote: Pubkey,   // offset 65,  size 32
+        // pub stake_account: Pubkey,    // offset 97,  size 32
+        // pub reserve_stake: Pubkey,    // offset 129, size 32
+        // _padding_1: [u8; 7],          // offset 161, size 7
+        // pub seed: u64,                // offset 168, size 8
+        // pub bump: u8,                 // offset 176, size 1
+        // pub stake_bump: u8,           // offset 177, size 1
+        // pub reserve_bump: u8,         // offset 179, size 1
+        // _padding_2: [u8; 5],          // offset 180, size 4
+        // pub lst_supply: u64,          // offset 188, size 8  ✅
 
-    // If your struct uses #[repr(C)] with padding, offsets may differ!
-    // Check your actual struct definition
+        // If your struct uses #[repr(C)] with padding, offsets may differ!
+        // Check your actual struct definition
 
-    const LST_SUPPLY_OFFSET: usize = 173; // Adjust this!
-    
-    eprintln!("  Raw bytes at offset {}: {:?}", LST_SUPPLY_OFFSET, &data[LST_SUPPLY_OFFSET..LST_SUPPLY_OFFSET + 8]);
-    
-    u64::from_le_bytes(data[LST_SUPPLY_OFFSET..LST_SUPPLY_OFFSET + 8].try_into().unwrap())
-}
+        const LST_SUPPLY_OFFSET: usize = 184; // Adjust this!
+
+        eprintln!(
+            "  Raw bytes at offset {}: {:?}",
+            LST_SUPPLY_OFFSET,
+            &data[LST_SUPPLY_OFFSET..LST_SUPPLY_OFFSET + 8]
+        );
+
+        u64::from_le_bytes(
+            data[LST_SUPPLY_OFFSET..LST_SUPPLY_OFFSET + 8]
+                .try_into()
+                .unwrap(),
+        )
+    }
 }

@@ -1,6 +1,6 @@
 use pinocchio::{account_info::AccountInfo, program_error::ProgramError};
 
-use crate::{AssociatedToken, Mint, PoolState, ProgramAccount, STAKE_PROGRAM_ID, SignerAccount};
+use crate::{AssociatedToken, Mint, ProgramAccount, STAKE_PROGRAM_ID, SignerAccount};
 
 pub struct WithdrawAccounts<'a> {
     pub user: &'a AccountInfo,
@@ -42,7 +42,7 @@ impl<'a> TryFrom<&'a [AccountInfo]> for WithdrawAccounts<'a> {
         };
 
         SignerAccount::check(user)?;
-        ProgramAccount::check::<PoolState>(pool_state)?;
+        ProgramAccount::check(pool_state)?;
         ProgramAccount::check_token_program(token_program)?;
         ProgramAccount::check_system_program(system_program)?;
 

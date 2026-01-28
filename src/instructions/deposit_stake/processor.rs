@@ -25,14 +25,13 @@ impl<'a> TryFrom<(&[u8], &'a [AccountInfo])> for Deposit<'a> {
         ProgramAccount::verify(
             &[
                 Seed::from(b"lst_pool"),
-                Seed::from(pool_state.authority.as_ref()),
                 Seed::from(&seed_bytes),
             ],
             accounts.pool_state,
             pool_state.bump,
         )?;
 
-        if pool_state.is_initialized == false {
+        if pool_state.discriminator == 0 {
             return Err(ProgramError::UninitializedAccount);
         }
 
@@ -69,7 +68,6 @@ impl<'a> Deposit<'a> {
             let bump_binding = [pool_state.bump];
             let pool_seeds = [
                 Seed::from(b"lst_pool"),
-                Seed::from(pool_state.authority.as_ref()),
                 Seed::from(&seed_binding),
                 Seed::from(&bump_binding),
             ];

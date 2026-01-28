@@ -42,7 +42,7 @@ mod tests {
 
     fn derive_pool_state_pda(initializer: &Pubkey, seed: u64) -> (Pubkey, u8) {
         Pubkey::find_program_address(
-            &[b"lst_pool", initializer.as_ref(), &seed.to_le_bytes()],
+            &[b"lst_pool", &seed.to_le_bytes()],
             &PROGRAM_ID,
         )
     }
@@ -74,19 +74,9 @@ mod tests {
         .0
     }
 
-    fn create_initialize_instruction_data(
-        seed: u64,
-        pool_bump: u8,
-        mint_bump: u8,
-        stake_bump: u8,
-        reserve_bump: u8,
-    ) -> Vec<u8> {
+    fn create_initialize_instruction_data(seed: u64) -> Vec<u8> {
         let mut data = vec![0u8]; // Discriminator for Initialize
         data.extend_from_slice(&seed.to_le_bytes());
-        data.push(pool_bump);
-        data.push(mint_bump);
-        data.push(stake_bump);
-        data.push(reserve_bump);
         data
     }
 
@@ -153,6 +143,7 @@ mod tests {
     }
 
     /// Helper to initialize a pool and return all the PDAs
+    /// Helper to initialize a pool and return all the PDAs
     fn initialize_pool(
         svm: &mut LiteSVM,
     ) -> (Keypair, Pubkey, Pubkey, Pubkey, Pubkey, Pubkey, u64) {
@@ -165,19 +156,13 @@ mod tests {
         let seed = 12345u64;
 
         let (pool_state_pda, pool_bump) = derive_pool_state_pda(&initializer.pubkey(), seed);
-        let (lst_mint_pda, mint_bump) = derive_lst_mint_pda(&pool_state_pda);
+        let lst_mint = Keypair::new();
         let (stake_account_pda, stake_bump) = derive_stake_account_pda(&pool_state_pda);
         let (reserve_stake_pda, reserve_bump) = derive_reserve_stake_account_pda(&pool_state_pda);
         let initializer_lst_ata =
-        get_associated_token_address(&initializer.pubkey(), &lst_mint_pda);
+            get_associated_token_address(&initializer.pubkey(), &lst_mint.pubkey());
 
-        let instruction_data = create_initialize_instruction_data(
-            seed,
-            pool_bump,
-            mint_bump,
-            stake_bump,
-            reserve_bump,
-        );
+        let instruction_data = create_initialize_instruction_data(seed);
 
         let instruction = Instruction {
             program_id: PROGRAM_ID,
@@ -185,7 +170,7 @@ mod tests {
                 AccountMeta::new(initializer.pubkey(), true), // initializer
                 AccountMeta::new(initializer_lst_ata, false), // initializer_lst_ata
                 AccountMeta::new(pool_state_pda, false),      // pool_state
-                AccountMeta::new(lst_mint_pda, false),        // lst_mint
+                AccountMeta::new(lst_mint.pubkey(), true),    // lst_mint
                 AccountMeta::new(stake_account_pda, false),   // stake_account
                 AccountMeta::new(reserve_stake_pda, false),   // reserve_stake
                 AccountMeta::new_readonly(validator_vote, false), // validator_vote
@@ -204,7 +189,7 @@ mod tests {
         let transaction = Transaction::new_signed_with_payer(
             &[instruction],
             Some(&initializer.pubkey()),
-            &[&initializer],
+            &[&initializer, &lst_mint],
             svm.latest_blockhash(),
         );
 
@@ -221,7 +206,7 @@ mod tests {
         (
             initializer,
             pool_state_pda,
-            lst_mint_pda,
+            lst_mint.pubkey(),
             stake_account_pda,
             reserve_stake_pda,
             validator_vote,
@@ -348,367 +333,370 @@ mod tests {
     }
 
     #[test]
-fn test_merge_reserve_before_initialized_fails() {
-    let mut svm = setup_svm();
+    fn test_merge_reserve_before_initialized_fails() {
+        let mut svm = setup_svm();
 
-    // Initialize pool (reserve is created but NOT initialized/delegated)
-    let (_, pool_state_pda, _, pool_stake_pda, reserve_stake_pda, _, _) =
-        initialize_pool(&mut svm);
+        // Initialize pool (reserve is created but NOT initialized/delegated)
+        let (_, pool_state_pda, _, pool_stake_pda, reserve_stake_pda, _, _) =
+            initialize_pool(&mut svm);
 
-    // Add lamports to reserve but DON'T call InitializeReserve
-    svm.airdrop(&reserve_stake_pda, 2_000_000_000).unwrap();
+        // Add lamports to reserve but DON'T call InitializeReserve
+        svm.airdrop(&reserve_stake_pda, 2_000_000_000).unwrap();
 
-    let crank = Keypair::new();
-    svm.airdrop(&crank.pubkey(), 1_000_000_000).unwrap();
+        let crank = Keypair::new();
+        svm.airdrop(&crank.pubkey(), 1_000_000_000).unwrap();
 
-    // Try to merge without initializing reserve first
-    let merge_ix = Instruction {
-        program_id: PROGRAM_ID,
-        accounts: vec![
-            AccountMeta::new(pool_state_pda, false),
-            AccountMeta::new(pool_stake_pda, false),
-            AccountMeta::new(reserve_stake_pda, false),
-            AccountMeta::new_readonly(CLOCK_SYSVAR.into(), false),
-            AccountMeta::new_readonly(STAKE_HISTORY_SYSVAR, false),
-            AccountMeta::new_readonly(STAKE_PROGRAM_ID, false),
-        ],
-        data: vec![3u8], // MergeReserve discriminator
-    };
+        // Try to merge without initializing reserve first
+        let merge_ix = Instruction {
+            program_id: PROGRAM_ID,
+            accounts: vec![
+                AccountMeta::new(pool_state_pda, false),
+                AccountMeta::new(pool_stake_pda, false),
+                AccountMeta::new(reserve_stake_pda, false),
+                AccountMeta::new_readonly(CLOCK_SYSVAR.into(), false),
+                AccountMeta::new_readonly(STAKE_HISTORY_SYSVAR, false),
+                AccountMeta::new_readonly(STAKE_PROGRAM_ID, false),
+            ],
+            data: vec![3u8], // MergeReserve discriminator
+        };
 
-    let tx = Transaction::new_signed_with_payer(
-        &[merge_ix],
-        Some(&crank.pubkey()),
-        &[&crank],
-        svm.latest_blockhash(),
-    );
+        let tx = Transaction::new_signed_with_payer(
+            &[merge_ix],
+            Some(&crank.pubkey()),
+            &[&crank],
+            svm.latest_blockhash(),
+        );
 
-    let result = svm.send_transaction(tx);
-    print_transaction_logs(&result);
+        let result = svm.send_transaction(tx);
+        print_transaction_logs(&result);
 
-    assert!(
-        result.is_err(),
-        "Merge should fail when reserve is not initialized/delegated"
-    );
+        assert!(
+            result.is_err(),
+            "Merge should fail when reserve is not initialized/delegated"
+        );
 
-    println!("\n=== Test Passed: Merge Before Initialize Rejected ===");
-}
-
-#[test]
-fn test_double_merge_fails() {
-    let mut svm = setup_svm();
-
-    // Initialize pool
-    let (_, pool_state_pda, _, pool_stake_pda, reserve_stake_pda, validator_vote, _) =
-        initialize_pool(&mut svm);
-
-    // Add lamports to reserve
-    svm.airdrop(&reserve_stake_pda, 2_000_000_000).unwrap();
-
-    let crank = Keypair::new();
-    svm.airdrop(&crank.pubkey(), 1_000_000_000).unwrap();
-
-    // Initialize reserve
-    let init_reserve_ix = Instruction {
-        program_id: PROGRAM_ID,
-        accounts: vec![
-            AccountMeta::new(pool_state_pda, false),
-            AccountMeta::new_readonly(pool_stake_pda, false),
-            AccountMeta::new(reserve_stake_pda, false),
-            AccountMeta::new_readonly(validator_vote, false),
-            AccountMeta::new_readonly(CLOCK_SYSVAR.into(), false),
-            AccountMeta::new_readonly(RENT_SYSVAR.into(), false),
-            AccountMeta::new_readonly(STAKE_HISTORY_SYSVAR, false),
-            AccountMeta::new_readonly(STAKE_CONFIG, false),
-            AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
-            AccountMeta::new_readonly(STAKE_PROGRAM_ID, false),
-        ],
-        data: vec![2u8],
-    };
-
-    let tx = Transaction::new_signed_with_payer(
-        &[init_reserve_ix],
-        Some(&crank.pubkey()),
-        &[&crank],
-        svm.latest_blockhash(),
-    );
-    svm.send_transaction(tx).unwrap();
-
-    // Warp forward so stakes become active
-    let slots_per_epoch = 432_000;
-    svm.warp_to_slot(slots_per_epoch * 2);
-
-    let merge_ix = Instruction {
-        program_id: PROGRAM_ID,
-        accounts: vec![
-            AccountMeta::new(pool_state_pda, false),
-            AccountMeta::new(pool_stake_pda, false),
-            AccountMeta::new(reserve_stake_pda, false),
-            AccountMeta::new_readonly(CLOCK_SYSVAR.into(), false),
-            AccountMeta::new_readonly(STAKE_HISTORY_SYSVAR, false),
-            AccountMeta::new_readonly(STAKE_PROGRAM_ID, false),
-        ],
-        data: vec![3u8],
-    };
-
-    // First merge should succeed
-    let tx1 = Transaction::new_signed_with_payer(
-        &[merge_ix.clone()],
-        Some(&crank.pubkey()),
-        &[&crank],
-        svm.latest_blockhash(),
-    );
-
-    let result = svm.send_transaction(tx1);
-    print_transaction_logs(&result);
-    assert!(result.is_ok(), "First merge should succeed");
-
-    // Verify reserve was absorbed
-    let reserve_after_first = svm.get_account(&reserve_stake_pda);
-    eprintln!("\n=== After First Merge ===");
-    match &reserve_after_first {
-        Some(acc) => eprintln!("  Reserve lamports: {}, owner: {:?}", acc.lamports, acc.owner),
-        None => eprintln!("  Reserve: CLOSED"),
+        println!("\n=== Test Passed: Merge Before Initialize Rejected ===");
     }
 
-    // Second merge should fail
-    let tx2 = Transaction::new_signed_with_payer(
-        &[merge_ix],
-        Some(&crank.pubkey()),
-        &[&crank],
-        svm.latest_blockhash(),
-    );
+    #[test]
+    fn test_double_merge_fails() {
+        let mut svm = setup_svm();
 
-    let result = svm.send_transaction(tx2);
-    print_transaction_logs(&result);
+        // Initialize pool
+        let (_, pool_state_pda, _, pool_stake_pda, reserve_stake_pda, validator_vote, _) =
+            initialize_pool(&mut svm);
 
-    assert!(
-        result.is_err(),
-        "Second merge should fail - reserve already absorbed"
-    );
+        // Add lamports to reserve
+        svm.airdrop(&reserve_stake_pda, 2_000_000_000).unwrap();
 
-    println!("\n=== Test Passed: Double Merge Rejected ===");
-}
+        let crank = Keypair::new();
+        svm.airdrop(&crank.pubkey(), 1_000_000_000).unwrap();
 
-#[test]
-fn test_merge_reserve_empty_fails() {
-    let mut svm = setup_svm();
+        // Initialize reserve
+        let init_reserve_ix = Instruction {
+            program_id: PROGRAM_ID,
+            accounts: vec![
+                AccountMeta::new(pool_state_pda, false),
+                AccountMeta::new_readonly(pool_stake_pda, false),
+                AccountMeta::new(reserve_stake_pda, false),
+                AccountMeta::new_readonly(validator_vote, false),
+                AccountMeta::new_readonly(CLOCK_SYSVAR.into(), false),
+                AccountMeta::new_readonly(RENT_SYSVAR.into(), false),
+                AccountMeta::new_readonly(STAKE_HISTORY_SYSVAR, false),
+                AccountMeta::new_readonly(STAKE_CONFIG, false),
+                AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
+                AccountMeta::new_readonly(STAKE_PROGRAM_ID, false),
+            ],
+            data: vec![2u8],
+        };
 
-    // Initialize pool
-    let (_, pool_state_pda, _, pool_stake_pda, reserve_stake_pda, _, _) =
-        initialize_pool(&mut svm);
+        let tx = Transaction::new_signed_with_payer(
+            &[init_reserve_ix],
+            Some(&crank.pubkey()),
+            &[&crank],
+            svm.latest_blockhash(),
+        );
+        svm.send_transaction(tx).unwrap();
 
-    // DON'T add any lamports to reserve - it stays empty
+        // Warp forward so stakes become active
+        let slots_per_epoch = 432_000;
+        svm.warp_to_slot(slots_per_epoch * 2);
 
-    let crank = Keypair::new();
-    svm.airdrop(&crank.pubkey(), 1_000_000_000).unwrap();
+        let merge_ix = Instruction {
+            program_id: PROGRAM_ID,
+            accounts: vec![
+                AccountMeta::new(pool_state_pda, false),
+                AccountMeta::new(pool_stake_pda, false),
+                AccountMeta::new(reserve_stake_pda, false),
+                AccountMeta::new_readonly(CLOCK_SYSVAR.into(), false),
+                AccountMeta::new_readonly(STAKE_HISTORY_SYSVAR, false),
+                AccountMeta::new_readonly(STAKE_PROGRAM_ID, false),
+            ],
+            data: vec![3u8],
+        };
 
-    let reserve_before = svm.get_account(&reserve_stake_pda).unwrap();
-    eprintln!("Reserve lamports before merge attempt: {}", reserve_before.lamports);
+        // First merge should succeed
+        let tx1 = Transaction::new_signed_with_payer(
+            &[merge_ix.clone()],
+            Some(&crank.pubkey()),
+            &[&crank],
+            svm.latest_blockhash(),
+        );
 
-    let merge_ix = Instruction {
-        program_id: PROGRAM_ID,
-        accounts: vec![
-            AccountMeta::new(pool_state_pda, false),
-            AccountMeta::new(pool_stake_pda, false),
-            AccountMeta::new(reserve_stake_pda, false),
-            AccountMeta::new_readonly(CLOCK_SYSVAR.into(), false),
-            AccountMeta::new_readonly(STAKE_HISTORY_SYSVAR, false),
-            AccountMeta::new_readonly(STAKE_PROGRAM_ID, false),
-        ],
-        data: vec![3u8],
-    };
+        let result = svm.send_transaction(tx1);
+        print_transaction_logs(&result);
+        assert!(result.is_ok(), "First merge should succeed");
 
-    let tx = Transaction::new_signed_with_payer(
-        &[merge_ix],
-        Some(&crank.pubkey()),
-        &[&crank],
-        svm.latest_blockhash(),
-    );
-
-    let result = svm.send_transaction(tx);
-    print_transaction_logs(&result);
-
-    assert!(
-        result.is_err(),
-        "Merge should fail when reserve has 0 lamports"
-    );
-
-    println!("\n=== Test Passed: Empty Reserve Merge Rejected ===");
-}
-
-#[test]
-fn test_merge_wrong_pool_stake_fails() {
-    let mut svm = setup_svm();
-
-    // Initialize pool
-    let (_, pool_state_pda, _, _pool_stake_pda, reserve_stake_pda, validator_vote, _) =
-        initialize_pool(&mut svm);
-
-    // Add lamports and initialize reserve
-    svm.airdrop(&reserve_stake_pda, 2_000_000_000).unwrap();
-
-    let crank = Keypair::new();
-    svm.airdrop(&crank.pubkey(), 1_000_000_000).unwrap();
-
-    let init_reserve_ix = Instruction {
-        program_id: PROGRAM_ID,
-        accounts: vec![
-            AccountMeta::new(pool_state_pda, false),
-            AccountMeta::new_readonly(_pool_stake_pda, false),
-            AccountMeta::new(reserve_stake_pda, false),
-            AccountMeta::new_readonly(validator_vote, false),
-            AccountMeta::new_readonly(CLOCK_SYSVAR.into(), false),
-            AccountMeta::new_readonly(RENT_SYSVAR.into(), false),
-            AccountMeta::new_readonly(STAKE_HISTORY_SYSVAR, false),
-            AccountMeta::new_readonly(STAKE_CONFIG, false),
-            AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
-            AccountMeta::new_readonly(STAKE_PROGRAM_ID, false),
-        ],
-        data: vec![2u8],
-    };
-
-    let tx = Transaction::new_signed_with_payer(
-        &[init_reserve_ix],
-        Some(&crank.pubkey()),
-        &[&crank],
-        svm.latest_blockhash(),
-    );
-    svm.send_transaction(tx).unwrap();
-
-    // Warp forward
-    let slots_per_epoch = 432_000;
-    svm.warp_to_slot(slots_per_epoch * 2);
-
-    // Create a FAKE pool stake account
-    let fake_pool_stake = Keypair::new();
-    svm.set_account(
-        fake_pool_stake.pubkey(),
-        Account {
-            lamports: 2_000_000_000,
-            data: vec![0u8; 200], // Fake stake data
-            owner: STAKE_PROGRAM_ID,
-            executable: false,
-            rent_epoch: 0,
+        // Verify reserve was absorbed
+        let reserve_after_first = svm.get_account(&reserve_stake_pda);
+        eprintln!("\n=== After First Merge ===");
+        match &reserve_after_first {
+            Some(acc) => eprintln!(
+                "  Reserve lamports: {}, owner: {:?}",
+                acc.lamports, acc.owner
+            ),
+            None => eprintln!("  Reserve: CLOSED"),
         }
-        .into(),
-    );
 
-    let merge_ix = Instruction {
-        program_id: PROGRAM_ID,
-        accounts: vec![
-            AccountMeta::new(pool_state_pda, false),
-            AccountMeta::new(fake_pool_stake.pubkey(), false), // WRONG pool stake
-            AccountMeta::new(reserve_stake_pda, false),
-            AccountMeta::new_readonly(CLOCK_SYSVAR.into(), false),
-            AccountMeta::new_readonly(STAKE_HISTORY_SYSVAR, false),
-            AccountMeta::new_readonly(STAKE_PROGRAM_ID, false),
-        ],
-        data: vec![3u8],
-    };
+        // Second merge should fail
+        let tx2 = Transaction::new_signed_with_payer(
+            &[merge_ix],
+            Some(&crank.pubkey()),
+            &[&crank],
+            svm.latest_blockhash(),
+        );
 
-    let tx = Transaction::new_signed_with_payer(
-        &[merge_ix],
-        Some(&crank.pubkey()),
-        &[&crank],
-        svm.latest_blockhash(),
-    );
+        let result = svm.send_transaction(tx2);
+        print_transaction_logs(&result);
 
-    let result = svm.send_transaction(tx);
-    print_transaction_logs(&result);
+        assert!(
+            result.is_err(),
+            "Second merge should fail - reserve already absorbed"
+        );
 
-    assert!(
-        result.is_err(),
-        "Merge with wrong pool stake should fail"
-    );
+        println!("\n=== Test Passed: Double Merge Rejected ===");
+    }
 
-    println!("\n=== Test Passed: Wrong Pool Stake Rejected ===");
-}
+    #[test]
+    fn test_merge_reserve_empty_fails() {
+        let mut svm = setup_svm();
 
-#[test]
-fn test_merge_wrong_reserve_stake_fails() {
-    let mut svm = setup_svm();
+        // Initialize pool
+        let (_, pool_state_pda, _, pool_stake_pda, reserve_stake_pda, _, _) =
+            initialize_pool(&mut svm);
 
-    // Initialize pool
-    let (_, pool_state_pda, _, pool_stake_pda, reserve_stake_pda, validator_vote, _) =
-        initialize_pool(&mut svm);
+        // DON'T add any lamports to reserve - it stays empty
 
-    // Add lamports and initialize real reserve
-    svm.airdrop(&reserve_stake_pda, 2_000_000_000).unwrap();
+        let crank = Keypair::new();
+        svm.airdrop(&crank.pubkey(), 1_000_000_000).unwrap();
 
-    let crank = Keypair::new();
-    svm.airdrop(&crank.pubkey(), 1_000_000_000).unwrap();
+        let reserve_before = svm.get_account(&reserve_stake_pda).unwrap();
+        eprintln!(
+            "Reserve lamports before merge attempt: {}",
+            reserve_before.lamports
+        );
 
-    let init_reserve_ix = Instruction {
-        program_id: PROGRAM_ID,
-        accounts: vec![
-            AccountMeta::new(pool_state_pda, false),
-            AccountMeta::new_readonly(pool_stake_pda, false),
-            AccountMeta::new(reserve_stake_pda, false),
-            AccountMeta::new_readonly(validator_vote, false),
-            AccountMeta::new_readonly(CLOCK_SYSVAR.into(), false),
-            AccountMeta::new_readonly(RENT_SYSVAR.into(), false),
-            AccountMeta::new_readonly(STAKE_HISTORY_SYSVAR, false),
-            AccountMeta::new_readonly(STAKE_CONFIG, false),
-            AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
-            AccountMeta::new_readonly(STAKE_PROGRAM_ID, false),
-        ],
-        data: vec![2u8],
-    };
+        let merge_ix = Instruction {
+            program_id: PROGRAM_ID,
+            accounts: vec![
+                AccountMeta::new(pool_state_pda, false),
+                AccountMeta::new(pool_stake_pda, false),
+                AccountMeta::new(reserve_stake_pda, false),
+                AccountMeta::new_readonly(CLOCK_SYSVAR.into(), false),
+                AccountMeta::new_readonly(STAKE_HISTORY_SYSVAR, false),
+                AccountMeta::new_readonly(STAKE_PROGRAM_ID, false),
+            ],
+            data: vec![3u8],
+        };
 
-    let tx = Transaction::new_signed_with_payer(
-        &[init_reserve_ix],
-        Some(&crank.pubkey()),
-        &[&crank],
-        svm.latest_blockhash(),
-    );
-    svm.send_transaction(tx).unwrap();
+        let tx = Transaction::new_signed_with_payer(
+            &[merge_ix],
+            Some(&crank.pubkey()),
+            &[&crank],
+            svm.latest_blockhash(),
+        );
 
-    // Warp forward
-    let slots_per_epoch = 432_000;
-    svm.warp_to_slot(slots_per_epoch * 2);
+        let result = svm.send_transaction(tx);
+        print_transaction_logs(&result);
 
-    // Create a FAKE reserve stake account
-    let fake_reserve = Keypair::new();
-    svm.set_account(
-        fake_reserve.pubkey(),
-        Account {
-            lamports: 2_000_000_000,
-            data: vec![0u8; 200], // Fake stake data
-            owner: STAKE_PROGRAM_ID,
-            executable: false,
-            rent_epoch: 0,
-        }
-        .into(),
-    );
+        assert!(
+            result.is_err(),
+            "Merge should fail when reserve has 0 lamports"
+        );
 
-    let merge_ix = Instruction {
-        program_id: PROGRAM_ID,
-        accounts: vec![
-            AccountMeta::new(pool_state_pda, false),
-            AccountMeta::new(pool_stake_pda, false),
-            AccountMeta::new(fake_reserve.pubkey(), false), // WRONG reserve
-            AccountMeta::new_readonly(CLOCK_SYSVAR.into(), false),
-            AccountMeta::new_readonly(STAKE_HISTORY_SYSVAR, false),
-            AccountMeta::new_readonly(STAKE_PROGRAM_ID, false),
-        ],
-        data: vec![3u8],
-    };
+        println!("\n=== Test Passed: Empty Reserve Merge Rejected ===");
+    }
 
-    let tx = Transaction::new_signed_with_payer(
-        &[merge_ix],
-        Some(&crank.pubkey()),
-        &[&crank],
-        svm.latest_blockhash(),
-    );
+    #[test]
+    fn test_merge_wrong_pool_stake_fails() {
+        let mut svm = setup_svm();
 
-    let result = svm.send_transaction(tx);
-    print_transaction_logs(&result);
+        // Initialize pool
+        let (_, pool_state_pda, _, _pool_stake_pda, reserve_stake_pda, validator_vote, _) =
+            initialize_pool(&mut svm);
 
-    assert!(
-        result.is_err(),
-        "Merge with wrong reserve stake should fail"
-    );
+        // Add lamports and initialize reserve
+        svm.airdrop(&reserve_stake_pda, 2_000_000_000).unwrap();
 
-    println!("\n=== Test Passed: Wrong Reserve Stake Rejected ===");
-}
+        let crank = Keypair::new();
+        svm.airdrop(&crank.pubkey(), 1_000_000_000).unwrap();
+
+        let init_reserve_ix = Instruction {
+            program_id: PROGRAM_ID,
+            accounts: vec![
+                AccountMeta::new(pool_state_pda, false),
+                AccountMeta::new_readonly(_pool_stake_pda, false),
+                AccountMeta::new(reserve_stake_pda, false),
+                AccountMeta::new_readonly(validator_vote, false),
+                AccountMeta::new_readonly(CLOCK_SYSVAR.into(), false),
+                AccountMeta::new_readonly(RENT_SYSVAR.into(), false),
+                AccountMeta::new_readonly(STAKE_HISTORY_SYSVAR, false),
+                AccountMeta::new_readonly(STAKE_CONFIG, false),
+                AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
+                AccountMeta::new_readonly(STAKE_PROGRAM_ID, false),
+            ],
+            data: vec![2u8],
+        };
+
+        let tx = Transaction::new_signed_with_payer(
+            &[init_reserve_ix],
+            Some(&crank.pubkey()),
+            &[&crank],
+            svm.latest_blockhash(),
+        );
+        svm.send_transaction(tx).unwrap();
+
+        // Warp forward
+        let slots_per_epoch = 432_000;
+        svm.warp_to_slot(slots_per_epoch * 2);
+
+        // Create a FAKE pool stake account
+        let fake_pool_stake = Keypair::new();
+        svm.set_account(
+            fake_pool_stake.pubkey(),
+            Account {
+                lamports: 2_000_000_000,
+                data: vec![0u8; 200], // Fake stake data
+                owner: STAKE_PROGRAM_ID,
+                executable: false,
+                rent_epoch: 0,
+            }
+            .into(),
+        );
+
+        let merge_ix = Instruction {
+            program_id: PROGRAM_ID,
+            accounts: vec![
+                AccountMeta::new(pool_state_pda, false),
+                AccountMeta::new(fake_pool_stake.pubkey(), false), // WRONG pool stake
+                AccountMeta::new(reserve_stake_pda, false),
+                AccountMeta::new_readonly(CLOCK_SYSVAR.into(), false),
+                AccountMeta::new_readonly(STAKE_HISTORY_SYSVAR, false),
+                AccountMeta::new_readonly(STAKE_PROGRAM_ID, false),
+            ],
+            data: vec![3u8],
+        };
+
+        let tx = Transaction::new_signed_with_payer(
+            &[merge_ix],
+            Some(&crank.pubkey()),
+            &[&crank],
+            svm.latest_blockhash(),
+        );
+
+        let result = svm.send_transaction(tx);
+        print_transaction_logs(&result);
+
+        assert!(result.is_err(), "Merge with wrong pool stake should fail");
+
+        println!("\n=== Test Passed: Wrong Pool Stake Rejected ===");
+    }
+
+    #[test]
+    fn test_merge_wrong_reserve_stake_fails() {
+        let mut svm = setup_svm();
+
+        // Initialize pool
+        let (_, pool_state_pda, _, pool_stake_pda, reserve_stake_pda, validator_vote, _) =
+            initialize_pool(&mut svm);
+
+        // Add lamports and initialize real reserve
+        svm.airdrop(&reserve_stake_pda, 2_000_000_000).unwrap();
+
+        let crank = Keypair::new();
+        svm.airdrop(&crank.pubkey(), 1_000_000_000).unwrap();
+
+        let init_reserve_ix = Instruction {
+            program_id: PROGRAM_ID,
+            accounts: vec![
+                AccountMeta::new(pool_state_pda, false),
+                AccountMeta::new_readonly(pool_stake_pda, false),
+                AccountMeta::new(reserve_stake_pda, false),
+                AccountMeta::new_readonly(validator_vote, false),
+                AccountMeta::new_readonly(CLOCK_SYSVAR.into(), false),
+                AccountMeta::new_readonly(RENT_SYSVAR.into(), false),
+                AccountMeta::new_readonly(STAKE_HISTORY_SYSVAR, false),
+                AccountMeta::new_readonly(STAKE_CONFIG, false),
+                AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
+                AccountMeta::new_readonly(STAKE_PROGRAM_ID, false),
+            ],
+            data: vec![2u8],
+        };
+
+        let tx = Transaction::new_signed_with_payer(
+            &[init_reserve_ix],
+            Some(&crank.pubkey()),
+            &[&crank],
+            svm.latest_blockhash(),
+        );
+        svm.send_transaction(tx).unwrap();
+
+        // Warp forward
+        let slots_per_epoch = 432_000;
+        svm.warp_to_slot(slots_per_epoch * 2);
+
+        // Create a FAKE reserve stake account
+        let fake_reserve = Keypair::new();
+        svm.set_account(
+            fake_reserve.pubkey(),
+            Account {
+                lamports: 2_000_000_000,
+                data: vec![0u8; 200], // Fake stake data
+                owner: STAKE_PROGRAM_ID,
+                executable: false,
+                rent_epoch: 0,
+            }
+            .into(),
+        );
+
+        let merge_ix = Instruction {
+            program_id: PROGRAM_ID,
+            accounts: vec![
+                AccountMeta::new(pool_state_pda, false),
+                AccountMeta::new(pool_stake_pda, false),
+                AccountMeta::new(fake_reserve.pubkey(), false), // WRONG reserve
+                AccountMeta::new_readonly(CLOCK_SYSVAR.into(), false),
+                AccountMeta::new_readonly(STAKE_HISTORY_SYSVAR, false),
+                AccountMeta::new_readonly(STAKE_PROGRAM_ID, false),
+            ],
+            data: vec![3u8],
+        };
+
+        let tx = Transaction::new_signed_with_payer(
+            &[merge_ix],
+            Some(&crank.pubkey()),
+            &[&crank],
+            svm.latest_blockhash(),
+        );
+
+        let result = svm.send_transaction(tx);
+        print_transaction_logs(&result);
+
+        assert!(
+            result.is_err(),
+            "Merge with wrong reserve stake should fail"
+        );
+
+        println!("\n=== Test Passed: Wrong Reserve Stake Rejected ===");
+    }
 }

@@ -1,6 +1,6 @@
 use pinocchio::{account_info::AccountInfo, program_error::ProgramError};
 
-use crate::{PoolState, ProgramAccount, STAKE_PROGRAM_ID, VOTE_PROGRAM_ID};
+use crate::{ProgramAccount, STAKE_PROGRAM_ID, VOTE_PROGRAM_ID};
 
 pub struct InitializeReserveAccounts<'a> {
     pub pool_state: &'a AccountInfo,
@@ -35,7 +35,7 @@ impl<'a> TryFrom<&'a [AccountInfo]> for InitializeReserveAccounts<'a> {
             return Err(ProgramError::NotEnoughAccountKeys);
         };
 
-        ProgramAccount::check::<PoolState>(pool_state)?;
+        ProgramAccount::check(pool_state)?;
         ProgramAccount::check_system_program(system_program)?;
 
         if stake_program.key() != &STAKE_PROGRAM_ID {

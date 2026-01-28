@@ -3,8 +3,7 @@ use pinocchio::{
 };
 
 use crate::{
-    InitializeReserveAccounts, MIN_STAKE_DELEGATION, PoolState, ProgramAccount, STAKE_ACCOUNT_SIZE,
-    delegate_stake, initialize_stake, reinit_stake_account,
+    InitializeReserveAccounts, MIN_STAKE_DELEGATION, PoolState, ProgramAccount, STAKE_ACCOUNT_SIZE, delegate_stake, initialize_stake, reinit_stake_account
 };
 
 pub struct InitializeReserve<'a> {
@@ -20,7 +19,7 @@ impl<'a> TryFrom<&'a [AccountInfo]> for InitializeReserve<'a> {
         let pool_state_data = accounts.pool_state.try_borrow_data()?;
         let pool_state = PoolState::load(&pool_state_data)?;
 
-        if pool_state.is_initialized == false {
+        if pool_state.discriminator == 0 {
             return Err(ProgramError::UninitializedAccount);
         }
 
@@ -28,7 +27,6 @@ impl<'a> TryFrom<&'a [AccountInfo]> for InitializeReserve<'a> {
         ProgramAccount::verify(
             &[
                 Seed::from(b"lst_pool"),
-                Seed::from(pool_state.authority.as_ref()),
                 Seed::from(&seed_bytes),
             ],
             accounts.pool_state,
@@ -66,7 +64,6 @@ impl<'a> InitializeReserve<'a> {
         let binding = [pool_state.bump];
         let pool_seeds = [
             Seed::from(b"lst_pool"),
-            Seed::from(pool_state.authority.as_ref()),
             Seed::from(&seed_binding),
             Seed::from(&binding),
         ];

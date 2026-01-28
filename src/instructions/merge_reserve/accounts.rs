@@ -1,6 +1,6 @@
 use pinocchio::{account_info::AccountInfo, program_error::ProgramError};
 
-use crate::{PoolState, ProgramAccount, STAKE_PROGRAM_ID};
+use crate::{ProgramAccount, STAKE_PROGRAM_ID};
 
 pub struct MergeReserveAccounts<'a> {
     pub pool_state: &'a AccountInfo,
@@ -27,7 +27,7 @@ impl<'a> TryFrom<&'a [AccountInfo]> for MergeReserveAccounts<'a> {
             return Err(ProgramError::NotEnoughAccountKeys);
         };
 
-        ProgramAccount::check::<PoolState>(pool_state)?;
+        ProgramAccount::check(pool_state)?;
 
         if stake_program.key() != &STAKE_PROGRAM_ID {
             return Err(ProgramError::IncorrectProgramId);

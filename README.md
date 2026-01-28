@@ -23,14 +23,14 @@ Creates a new staking pool.
 - `initializer` (signer, mut) - Pool creator, pays for accounts
 - `initializer_lst_ata` (mut) - Receives initial LST tokens
 - `pool_state` (mut) - PDA storing pool configuration
-- `lst_mint` (mut) - LST token mint
+- `lst_mint` (signer, mut) - LST token mint
 - `stake_account` (mut) - Main stake account delegated to validator
 - `reserve_stake` (mut) - Reserve for collecting deposits
 - `validator_vote` - Validator vote account to delegate to
 - Sysvars: clock, rent, stake_history, stake_config
 - Programs: system, token, stake, ata
 
-**Data:** `seed (u64) | pool_bump (u8) | mint_bump (u8) | stake_bump (u8) | reserve_bump (u8)`
+**Data:** `seed (u64)`
 
 **Effect:** Creates pool with 1 SOL minimum stake, mints equivalent LST to initializer.
 
@@ -46,7 +46,7 @@ Deposit SOL to receive LST tokens.
 - `reserve_stake` (mut) - Receives deposited SOL
 - `lst_mint` (mut) - Mint LST to depositor
 - `depositor_lst_ata` (mut) - Receives LST tokens
-- Programs: system, token, stake, ata
+- Programs: system, token, stake
 
 **Data:** `amount (u64)`
 
@@ -107,7 +107,7 @@ Burns LST and creates a deactivating stake account for the user.
 - Sysvars: clock, rent, stake_history
 - Programs: system, stake, token
 
-**Data:** `amount (u64) | nonce (u64) | user_stake_bump (u8)`
+**Data:** `amount (u64) | nonce (u64)`
 
 **Effect:**
 - Burns user's LST
@@ -128,7 +128,7 @@ Claims SOL after stake cooldown completes.
 - Sysvars: clock, stake_history
 - Programs: stake
 
-**Data:** `nonce (u64) | user_stake_bump (u8)`
+**Data:** `nonce (u64)`
 
 **Effect:** Withdraws all lamports from user_stake to user.
 
@@ -155,8 +155,7 @@ As staking rewards accrue, `total_pool_value` increases while `lst_supply` stays
 
 | Account | Seeds |
 |---------|-------|
-| pool_state | `["lst_pool", initializer, seed]` |
-| lst_mint | `["lst_mint", pool_state]` |
+| pool_state | `["lst_pool", seed]` |
 | stake_account | `["stake", pool_state]` |
 | reserve_stake | `["reserve_stake", pool_state]` |
 | user_stake | `["withdraw", pool_state, user, nonce]` |
